@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+.vercel
+
+# NOTE: /assets is intentionally NOT ignored — the game ships its art.
+# The one exception is the music track, which is not redistributable:
+assets/buttrock.mp3

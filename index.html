@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#87a0b8">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TRAFFIC SIMULATOR 3000</title>
+<style>
+  :root{
+    --paper:#e8e3d6;
+    --ink:#1a1a17;
+    --red:#b4231d;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;width:100%;height:100%;
+    background:#000;overflow:hidden;
+    touch-action:none;overscroll-behavior:none;
+    -webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  canvas{display:block;position:fixed;inset:0;width:100%;height:100%;}
+  #gl{z-index:1;}
+  #ui{z-index:2;}
+
+  .screen{
+    position:fixed;inset:0;z-index:5;
+    display:flex;align-items:center;justify-content:center;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .screen[hidden]{display:none;}
+
+  /* ---------- START ---------- */
+  #start{
+    background:
+      radial-gradient(ellipse at 50% 38%, #3b4a58 0%, #14181d 62%, #07090b 100%);
+    cursor:pointer;text-align:center;
+  }
+  #start .inner{padding:24px;max-width:min(92vw,760px);}
+  #titleArt{
+    display:block;width:100%;max-width:min(88vw,680px);
+    max-height:52vh;object-fit:contain;margin:0 auto;
+    filter:drop-shadow(0 6px 24px rgba(0,0,0,.55));
+  }
+  #titleArt[hidden]{display:none;}
+  #start h1{
+    margin:0;
+    font-size:clamp(28px,8.2vw,74px);
+    line-height:.94;letter-spacing:.02em;
+    color:#f2ede0;
+    text-shadow:0 2px 0 #000, 0 0 26px rgba(255,196,90,.28);
+  }
+  #start h1 .three{
+    display:block;
+    color:#ffc14d;
+    -webkit-text-stroke:1px rgba(0,0,0,.5);
+  }
+  #start .rule{
+    height:3px;margin:18px auto 16px;width:min(72%,420px);
+    background:repeating-linear-gradient(90deg,#ffc14d 0 22px,transparent 22px 40px);
+    opacity:.85;
+  }
+  #start .sub{
+    color:#b9c4cd;font-size:clamp(11px,2.5vw,15px);
+    line-height:1.55;margin:0 0 26px;
+  }
+  #start .cta{
+    display:inline-block;padding:14px 26px;
+    border:2px solid #ffc14d;color:#ffc14d;
+    font-size:clamp(12px,3.1vw,19px);letter-spacing:.12em;
+    animation:blink 1.5s steps(1,end) infinite;
+  }
+  @keyframes blink{50%{opacity:.32}}
+  #start .keys{
+    margin-top:26px;color:#7d8b97;font-size:clamp(9px,2.1vw,12px);
+    line-height:1.8;letter-spacing:.04em;
+  }
+
+  /* ---------- GAME OVER : insurance form ---------- */
+  #over{background:rgba(6,8,10,.72);backdrop-filter:blur(2px);}
+  #over .form{
+    width:min(94vw,560px);max-height:94vh;overflow:auto;
+    background:var(--paper);color:var(--ink);
+    padding:clamp(14px,3.4vw,26px);
+    border:1px solid #a09a88;
+    box-shadow:0 18px 60px rgba(0,0,0,.7);
+    transform:rotate(-.5deg);
+    background-image:linear-gradient(rgba(0,0,0,.028) 1px,transparent 1px);
+    background-size:100% 22px;
+  }
+  #over .hdr{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    gap:10px;border-bottom:2px solid var(--ink);padding-bottom:8px;
+  }
+  #over .hdr h2{
+    margin:0;font-size:clamp(11px,2.6vw,14px);
+    letter-spacing:.06em;font-weight:700;text-transform:uppercase;
+  }
+  #over .hdr .no{font-size:clamp(9px,2vw,11px);opacity:.72;text-align:right;white-space:nowrap;}
+  #over .stamp{
+    margin:16px 0 14px;text-align:center;
+    color:var(--red);border:3px double var(--red);
+    padding:9px 6px;transform:rotate(-1.4deg);
+    font-size:clamp(15px,4.6vw,29px);letter-spacing:.09em;font-weight:700;
+  }
+  #over table{width:100%;border-collapse:collapse;font-size:clamp(10px,2.4vw,13px);}
+  #over td{padding:6px 4px;border-bottom:1px dotted #8d8878;vertical-align:baseline;}
+  #over td.k{text-transform:uppercase;letter-spacing:.05em;opacity:.7;width:56%;}
+  #over td.v{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;}
+  #over .note{
+    margin:14px 0 4px;font-size:clamp(9px,2.1vw,11px);
+    line-height:1.6;opacity:.72;border-top:1px solid #b3ad9c;padding-top:10px;
+  }
+  #over .sig{
+    margin-top:12px;font-size:clamp(9px,2vw,11px);opacity:.6;
+    display:flex;justify-content:space-between;gap:12px;
+  }
+  #over .sig span{border-bottom:1px solid var(--ink);flex:1;padding-bottom:2px;}
+  #ignition{
+    display:block;width:100%;margin-top:18px;padding:15px 10px;
+    font-family:inherit;font-size:clamp(12px,3.2vw,17px);letter-spacing:.16em;
+    background:var(--ink);color:var(--paper);border:none;cursor:pointer;
+    font-weight:700;
+  }
+  #ignition:active{transform:translateY(1px);}
+
+  #fatal{
+    position:fixed;inset:0;z-index:9;display:none;
+    align-items:center;justify-content:center;padding:28px;
+    background:#0b0d10;color:#e5b8b4;text-align:center;
+    font-size:14px;line-height:1.7;
+  }
+  #fatal code{background:#1b1f25;padding:2px 7px;color:#ffc14d;}
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<canvas id="ui"></canvas>
+
+<div class="screen" id="start">
+  <div class="inner">
+    <img id="titleArt" alt="Traffic Simulator 3000" hidden>
+    <h1 id="titleText">TRAFFIC<br>SIMULATOR<span class="three">3000</span></h1>
+    <div class="rule"></div>
+    <p class="sub">
+      Interstate 5. Northbound. Tuesday.<br>
+      You are not going to make it on time.
+    </p>
+    <div class="cta">TAP TO START YOUR COMMUTE</div>
+    <div class="keys">
+      W / &uarr; GAS &nbsp;&middot;&nbsp; SPACE / &darr; BRAKE &nbsp;&middot;&nbsp; A D / &larr; &rarr; STEER &nbsp;&middot;&nbsp; S STEREO
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="over" hidden>
+  <div class="form">
+    <div class="hdr">
+      <h2>Motor Vehicle<br>Incident Report</h2>
+      <div class="no">FORM MV-3000<br>CLAIM <span id="claimNo">000000</span></div>
+    </div>
+    <div class="stamp">COMMUTE TERMINATED</div>
+    <table>
+      <tr><td class="k">Time in traffic</td><td class="v" id="sTime">00:00</td></tr>
+      <tr><td class="k">Distance travelled</td><td class="v" id="sDist">0 ft</td></tr>
+      <tr><td class="k">Average speed</td><td class="v" id="sAvg">0.0 mph</td></tr>
+      <tr><td class="k">Top speed attained</td><td class="v" id="sTop">0.0 mph</td></tr>
+      <tr><td class="k">Minor contacts (love taps)</td><td class="v" id="sBumps">0</td></tr>
+      <tr><td class="k">Horns directed at operator</td><td class="v" id="sHonks">0</td></tr>
+      <tr><td class="k">Impact speed</td><td class="v" id="sImpact">0.0 mph</td></tr>
+      <tr><td class="k">Fault</td><td class="v">OPERATOR</td></tr>
+    </table>
+    <p class="note" id="verdict">
+      Operator failed to maintain a safe following distance.
+    </p>
+    <div class="sig"><span>OPERATOR SIGNATURE</span><span>DATE</span></div>
+    <button id="ignition">IGNITION</button>
+  </div>
+</div>
+
+<div id="fatal">
+  <div>
+    <strong>Three.js could not load.</strong><br><br>
+    This page uses ES modules, so it must be served over HTTP &mdash;<br>
+    opening the file directly with <code>file://</code> will not work.<br><br>
+    From the project folder run:<br>
+    <code>python3 -m http.server 8000</code><br><br>
+    then open <code>http://localhost:8000</code>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+  import('./main.js').catch(err => {
+    console.error(err);
+    document.getElementById('fatal').style.display = 'flex';
+  });
+</script>
+</body>
+</html>
