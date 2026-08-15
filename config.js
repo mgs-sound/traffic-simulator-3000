@@ -279,6 +279,58 @@ export const TOUCH = {
 };
 
 // =============================================================================
+//  AUDIO
+//  Master gain bus with three sub-buses. Music deliberately sits UNDER the
+//  ambient bed: the horns are the signature sound of this game, and the world
+//  has to stay audible with the stereo on.
+// =============================================================================
+
+export const AUDIO = {
+  MASTER:  0.90,
+  MUSIC:   0.30,   // the cassette, kept below the traffic
+  AMBIENT: 0.62,   // engine drone + freeway rumble + the endless honking
+  SFX:     0.90,   // reactive: squeaks, thunks, the crash
+
+  // "blown factory speakers" EQ on the cassette
+  MUSIC_LOWPASS_HZ:  3100,
+  MUSIC_HIGHPASS_HZ:  190,
+  MUSIC_PEAK_HZ:     1400,
+  MUSIC_PEAK_DB:        4,
+
+  ENGINE_LEVEL: 0.17,
+  ENGINE_GAS_BOOST: 0.10,
+  RUMBLE_LEVEL: 0.11,
+  RUMBLE_SWELL_S: 14,     // period of the slow distant-traffic swell
+
+  // --- the nonstop honking ---
+  HONK_MIN_S: 2.0,        // somewhere out there, someone leans on the horn
+  HONK_MAX_S: 8.0,
+  HONK_PITCH_JITTER: 0.15,
+  MAX_HONK_VOICES: 6,     // hard cap so flurries cannot clip the bus
+  HONK_MIN_DIST: 4,       // metres, for random ambient honks
+  HONK_MAX_DIST: 70,
+  FLURRY_MIN: 3,          // honks released when a wave slams to a stop
+  FLURRY_MAX: 6,
+  FLURRY_SPREAD_S: 1.6,
+
+  // --- distant off-screen flavour (never a visible NPC collision) ---
+  FLAVOR_MIN_S: 45,
+  FLAVOR_MAX_S: 120,
+  FLAVOR_CRASH_CHANCE: 0.22,
+
+  // --- reactive ---
+  BRAKE_SQUEAK_MIN_MPH: 5.0,
+  NPC_SCREECH_DECEL: 4.5,   // m/s² of NPC braking that squeals a tyre
+  NPC_SCREECH_RANGE: 40,    // m
+  NPC_SCREECH_COOLDOWN: 2.5,
+
+  // --- game over beat: crash, silence, one lone sad horn, then the form ---
+  CRASH_DUCK: 0.15,
+  GAMEOVER_SAD_HONK_S: 2.6,
+  GAMEOVER_STATS_S: 3.35,
+};
+
+// =============================================================================
 //  WORLD ART
 //  Freeway_Wall.png is a single sheet holding three stacked strips. Bands are
 //  detected at load; these are the fallbacks and the real-world scaling.

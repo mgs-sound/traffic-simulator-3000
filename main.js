@@ -10,7 +10,7 @@
 // =============================================================================
 
 import * as THREE from 'three';
-import { CFG, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, MPH, FT } from './config.js';
+import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, MPH, FT } from './config.js';
 
 // ---------------------------------------------------------------- utilities --
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -1066,6 +1066,8 @@ function updateWave(lane, dt) {
       // ...and then the lead car SLAMS the brakes with zero warning.
       lane.slamming = Math.random() < CFG.SLAM_CHANCE;
       lane.leadTarget = lane.slamming ? 0 : CFG.CRAWL_SPEED * 0.5;
+      // the stop propagates back as a chain of horns
+      if (lane.slamming && state === 'play') Audio.honkFlurry();
       lane.state = 'crawl';
       lane.waveTimer = rand(CFG.WAVE_INTERVAL_MIN, CFG.WAVE_INTERVAL_MAX);
       lane.lurchTimer = rand(CFG.LURCH_MIN, CFG.LURCH_MAX);
@@ -1122,6 +1124,21 @@ function updateLane(lane, dt) {
     car.speed = Math.max(0, car.speed + a * dt);
     car.s    += car.speed * dt;
     car.braking = (a < -CFG.NPC_BRAKELIGHT_DECEL) || (car.speed < 0.12 && target < 0.12);
+
+    // A car ahead standing on its brakes squeals — louder the closer it is.
+    car.screechCooldown = (car.screechCooldown || 0) - dt;
+    if (state === 'play' && a < -AUDIO.NPC_SCREECH_DECEL && car.speed > 1.2 && car.screechCooldown <= 0) {
+      const ahead = car.s - player.s;
+      if (ahead > 0 && ahead < AUDIO.NPC_SCREECH_RANGE) {
+        car.screechCooldown = AUDIO.NPC_SCREECH_COOLDOWN;
+        const lx = laneX(lane.index);
+        Audio.screech({
+          pan: clamp((lx - player.x) / (CFG.LANE_WIDTH * 2), -1, 1),
+          dist: ahead,
+          intensity: clamp(1 - ahead / AUDIO.NPC_SCREECH_RANGE, 0.25, 1),
+        });
+      }
+    }
   }
 
   // --- recycling -------------------------------------------------------------
@@ -1323,7 +1340,14 @@ function checkCollisions() {
         stats.lastBump = stats.time;
         stats.bumps++;
         Audio.thunk();
-        Audio.horn(Math.min(3, stats.bumps));   // escalating anger
+        // the car you nudged leans on the horn, angrier every time
+        Audio.honk({
+          kind: 'lean',
+          pan: clamp((lx - player.x) / (CFG.LANE_WIDTH * 1.6), -1, 1),
+          dist: 3,
+          anger: Math.min(3, stats.bumps),
+          bus: Audio.sfxBus,
+        });
         stats.honks++;
         shake(0.55);
       }
@@ -1331,18 +1355,30 @@ function checkCollisions() {
   }
 }
 
+// Drift toward an occupied lane and the neighbours object — from their own
+// pan position, and they get angrier the longer you sit there.
 function updateHonking(dt) {
   const encroach = CFG.LANE_WIDTH * CFG.HONK_LATERAL_TRIGGER;
   for (const lane of lanes) {
     if (lane.index === player.lane0) continue;
     const lx = laneX(lane.index);
     const near = Math.abs(player.x - lx) < encroach;
+    lane.encroachT = near ? (lane.encroachT || 0) + dt : 0;
+
     for (const car of lane.cars) {
       car.honkCooldown -= dt;
       if (!near || car.honkCooldown > 0) continue;
-      if (Math.abs(car.s - player.s) < CFG.HONK_RANGE) {
+      const rel = car.s - player.s;
+      if (Math.abs(rel) < CFG.HONK_RANGE) {
         car.honkCooldown = CFG.HONK_COOLDOWN + rand(0, 1.5);
-        Audio.horn(randi(4));
+        const anger = clamp(lane.encroachT / 2.5, 0, 2);
+        Audio.honk({
+          kind: anger > 1.2 ? 'lean' : (anger > 0.5 ? 'mid' : 'double'),
+          pan: clamp((lx - player.x) / (CFG.LANE_WIDTH * 1.6), -1, 1),
+          dist: Math.max(2, Math.abs(rel)),
+          anger,
+          bus: Audio.sfxBus,
+        });
         stats.honks++;
       }
     }
@@ -1356,74 +1392,294 @@ function updateHonking(dt) {
 // =============================================================================
 
 const Audio = {
-  ctx: null, master: null, ready: false,
-  engineOsc: [], engineGain: null, rumbleGain: null,
-  music: null, musicGain: null, musicEl: null,
-  riff: null, riffTimer: null, usingPlaceholder: false,
-  stereoOn: false,
+  ctx: null, ready: false,
+  master: null, musicBus: null, ambientBus: null, sfxBus: null,
+  engineOsc: [], engineGain: null, rumbleGain: null, rumbleLFO: null,
+  musicEl: null, riffTimer: null, usingPlaceholder: false,
+  stereoOn: false, noiseBuf: null,
+  honkVoices: 0, honkTimer: null, flavorTimer: null,
+  _squeakUntil: 0, _crashing: false,
 
+  // ---------------------------------------------------------------- setup --
   init() {
     if (this.ready) return;
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
+    if (!AC) { console.warn('[audio] WebAudio unavailable'); return; }
     this.ctx = new AC();
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 0.9;
-    this.master.connect(this.ctx.destination);
-    this.ready = true;
 
-    // --- idle engine drone ---
+    // --- bus tree: master -> {music, ambient, sfx} ---
+    this.master = this.ctx.createGain();
+    this.master.gain.value = AUDIO.MASTER;
+    this.master.connect(this.ctx.destination);
+
+    this.musicBus   = this.ctx.createGain();
+    this.ambientBus = this.ctx.createGain();
+    this.sfxBus     = this.ctx.createGain();
+    this.musicBus.gain.value   = 0;             // faded in by the stereo toggle
+    this.ambientBus.gain.value = AUDIO.AMBIENT;
+    this.sfxBus.gain.value     = AUDIO.SFX;
+    for (const b of [this.musicBus, this.ambientBus, this.sfxBus]) b.connect(this.master);
+
+    this.ready = true;
+    this._buildNoise();
+    this._buildEngine();
+    this._buildRumble();
+    this._initMusic();
+  },
+
+  // iOS will not start a context outside a gesture, and needs a real buffer to
+  // play once before it will make any sound at all.
+  unlock() {
+    if (!this.ready) this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const s = this.ctx.createBufferSource();
+    s.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
+    s.connect(this.ctx.destination);
+    s.start(0);
+  },
+
+  _buildNoise() {
+    const len = this.ctx.sampleRate * 3;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 3.2; }
+    this.noiseBuf = buf;
+  },
+
+  _buildEngine() {
     this.engineGain = this.ctx.createGain();
-    this.engineGain.gain.value = 0.0;
-    const eLP = this.ctx.createBiquadFilter();
-    eLP.type = 'lowpass'; eLP.frequency.value = 420; eLP.Q.value = 4;
-    this.engineGain.connect(eLP); eLP.connect(this.master);
+    this.engineGain.gain.value = 0;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 4;
+    this.engineGain.connect(lp); lp.connect(this.ambientBus);
     for (const [f, t, g] of [[46, 'sawtooth', 0.5], [92.6, 'sawtooth', 0.28], [138, 'triangle', 0.14]]) {
       const o = this.ctx.createOscillator(); o.type = t; o.frequency.value = f;
       const og = this.ctx.createGain(); og.gain.value = g;
       o.connect(og); og.connect(this.engineGain); o.start();
       this.engineOsc.push({ o, base: f });
     }
+  },
 
-    // --- distant traffic rumble (brown noise) ---
-    const len = this.ctx.sampleRate * 3;
-    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    let last = 0;
-    for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 3.2; }
-    const src = this.ctx.createBufferSource(); src.buffer = buf; src.loop = true;
-    const rLP = this.ctx.createBiquadFilter(); rLP.type = 'lowpass'; rLP.frequency.value = 260;
-    this.rumbleGain = this.ctx.createGain(); this.rumbleGain.gain.value = 0.10;
-    src.connect(rLP); rLP.connect(this.rumbleGain); this.rumbleGain.connect(this.master);
+  _buildRumble() {
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf; src.loop = true;
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260;
+    this.rumbleGain = this.ctx.createGain();
+    this.rumbleGain.gain.value = 0;
+    src.connect(lp); lp.connect(this.rumbleGain); this.rumbleGain.connect(this.ambientBus);
     src.start();
-    this.noiseBuf = buf;
 
-    this._initMusic();
+    // slow swells, as if the far lanes were breathing
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 1 / AUDIO.RUMBLE_SWELL_S;
+    const depth = this.ctx.createGain();
+    depth.gain.value = AUDIO.RUMBLE_LEVEL * 0.45;
+    lfo.connect(depth); depth.connect(this.rumbleGain.gain);
+    lfo.start();
+    this.rumbleLFO = lfo;
   },
 
   _initMusic() {
-    this.musicGain = this.ctx.createGain();
-    this.musicGain.gain.value = 0;
-    // blown factory speakers: roll off the top, gut the bass
-    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass';  lp.frequency.value = 3100; lp.Q.value = 0.9;
-    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 190;
-    const peak = this.ctx.createBiquadFilter(); peak.type = 'peaking'; peak.frequency.value = 1400;
-    peak.gain.value = 4; peak.Q.value = 1.1;
-    this.musicGain.connect(hp); hp.connect(peak); peak.connect(lp); lp.connect(this.master);
+    // "blown factory speakers": gut the bass, roll off the top, push the mids
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = AUDIO.MUSIC_HIGHPASS_HZ;
+    const peak = this.ctx.createBiquadFilter(); peak.type = 'peaking';
+    peak.frequency.value = AUDIO.MUSIC_PEAK_HZ; peak.gain.value = AUDIO.MUSIC_PEAK_DB; peak.Q.value = 1.1;
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass';
+    lp.frequency.value = AUDIO.MUSIC_LOWPASS_HZ; lp.Q.value = 0.9;
+    hp.connect(peak); peak.connect(lp); lp.connect(this.musicBus);
+    this.musicIn = hp;
 
     if (ART.musicOk) {
       this.musicEl = new window.Audio(ASSETS.music);
       this.musicEl.loop = true;
       this.musicEl.preload = 'auto';
+      this.musicEl.crossOrigin = 'anonymous';
       try {
-        const node = this.ctx.createMediaElementSource(this.musicEl);
-        node.connect(this.musicGain);
-      } catch (e) { ART.musicOk = false; }
+        this.ctx.createMediaElementSource(this.musicEl).connect(this.musicIn);
+        this.usingPlaceholder = false;
+        console.info('[audio] cassette loaded from ' + ASSETS.music);
+      } catch (e) {
+        console.warn('[audio] could not route mp3, falling back to riff', e);
+        ART.musicOk = false;
+      }
     }
-    if (!ART.musicOk) this.usingPlaceholder = true;
+    if (!ART.musicOk) {
+      this.usingPlaceholder = true;
+      console.info('[audio] no mp3 — stereo will play the placeholder riff');
+    }
   },
 
-  // Placeholder buttrock: a dumb, immortal power-chord riff.
+  // ------------------------------------------------------------- helpers --
+  _pan(value) {
+    if (this.ctx.createStereoPanner) {
+      const p = this.ctx.createStereoPanner();
+      p.pan.value = clamp(value, -1, 1);
+      return p;
+    }
+    // Safari fallbacks: a 3D panner positioned on the X axis
+    const p = this.ctx.createPanner();
+    p.panningModel = 'equalpower';
+    if (p.positionX) p.positionX.value = clamp(value, -1, 1);
+    else p.setPosition(clamp(value, -1, 1), 0, 1 - Math.abs(value) * 0.5);
+    return p;
+  },
+
+  _noise(dur) {
+    const s = this.ctx.createBufferSource();
+    s.buffer = this.noiseBuf; s.loop = true;
+    s.start(); s.stop(this.ctx.currentTime + dur);
+    return s;
+  },
+
+  // =========================================================== HONK VOICES ==
+  // 5 characters. Everything is pitch-jittered, panned, and attenuated +
+  // low-passed by distance so the soundscape has depth.
+  HONK_KINDS: ['beep', 'double', 'lean', 'sad', 'mid'],
+
+  honk({ kind = 'mid', pan = 0, dist = 12, anger = 0, bus = null } = {}) {
+    if (!this.ready) return;
+    if (this.honkVoices >= AUDIO.MAX_HONK_VOICES) return;   // voice cap
+    this.honkVoices++;
+
+    const t0 = this.ctx.currentTime;
+    const jitter = 1 + rand(-AUDIO.HONK_PITCH_JITTER, AUDIO.HONK_PITCH_JITTER);
+    const base = ({ beep: 430, double: 470, lean: 355, sad: 300, mid: 400 }[kind]) * jitter;
+
+    // pattern: [offset, duration] blips
+    let blips;
+    switch (kind) {
+      case 'beep':   blips = [[0, 0.16]]; break;
+      case 'double': blips = [[0, 0.12], [0.20, 0.13]]; break;
+      case 'lean':   blips = [[0, 1.10 + anger * 0.5]]; break;
+      case 'sad':    blips = [[0, 0.55]]; break;
+      default:       blips = [[0, 0.38]];
+    }
+    const total = blips[blips.length - 1][0] + blips[blips.length - 1][1];
+
+    // distance: quieter, duller, and slightly wider the further away
+    const atten = 1 / (1 + dist / 9);
+    const out = this.ctx.createGain();
+    out.gain.value = atten * (kind === 'sad' ? 0.55 : 1) * (1 + anger * 0.25);
+
+    const tone = this.ctx.createBiquadFilter();
+    tone.type = 'lowpass';
+    tone.frequency.value = clamp(9000 / (1 + dist / 6), 700, 9000) * (kind === 'sad' ? 0.45 : 1);
+
+    const shape = this.ctx.createBiquadFilter();
+    shape.type = 'bandpass';
+    shape.frequency.value = base * 2.1;
+    shape.Q.value = 1.1 + anger * 0.5;
+
+    const panner = this._pan(pan);
+    shape.connect(tone); tone.connect(out); out.connect(panner);
+    panner.connect(bus || this.ambientBus);
+
+    for (const [off, dur] of blips) {
+      const t = t0 + off;
+      const g = this.ctx.createGain();
+      const peak = 0.20 + anger * 0.05;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + 0.025);
+      g.gain.setValueAtTime(peak, t + Math.max(0.03, dur - 0.07));
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      // a real horn is two slightly detuned reeds plus a harmonic
+      for (const m of [1, 1.5, 2.02]) {
+        const o = this.ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = base * m;
+        // angry horns waver
+        if (anger > 0) o.frequency.setValueAtTime(base * m * (1 + 0.01 * anger), t + dur * 0.5);
+        o.connect(g); o.start(t); o.stop(t + dur + 0.03);
+      }
+      g.connect(shape);
+    }
+
+    setTimeout(() => { this.honkVoices = Math.max(0, this.honkVoices - 1); }, (total + 0.2) * 1000);
+  },
+
+  randomHonk() {
+    const kind = this.HONK_KINDS[randi(this.HONK_KINDS.length)];
+    this.honk({
+      kind,
+      pan: rand(-1, 1),
+      dist: rand(AUDIO.HONK_MIN_DIST, AUDIO.HONK_MAX_DIST),
+    });
+  },
+
+  // A wave slamming to a halt sets off a chain of horns down the queue.
+  honkFlurry(n) {
+    if (!this.ready) return;
+    const count = n || Math.round(rand(AUDIO.FLURRY_MIN, AUDIO.FLURRY_MAX));
+    for (let i = 0; i < count; i++) {
+      const delay = (i / count) * AUDIO.FLURRY_SPREAD_S + rand(0, 0.25);
+      setTimeout(() => this.randomHonk(), delay * 1000);
+    }
+  },
+
+  _scheduleHonks() {
+    const next = rand(AUDIO.HONK_MIN_S, AUDIO.HONK_MAX_S);
+    this.honkTimer = setTimeout(() => {
+      if (!this._crashing) this.randomHonk();
+      this._scheduleHonks();
+    }, next * 1000);
+  },
+
+  // ------------------------------------ distant, off-screen flavour events --
+  // Purely atmospheric: no visible NPC ever collides (GDD §5).
+  _scheduleFlavor() {
+    const next = rand(AUDIO.FLAVOR_MIN_S, AUDIO.FLAVOR_MAX_S);
+    this.flavorTimer = setTimeout(() => {
+      if (!this._crashing) {
+        if (Math.random() < AUDIO.FLAVOR_CRASH_CHANCE) this.distantCrash();
+        else this.screech({ pan: rand(-1, 1), dist: rand(45, 90), intensity: 0.7 });
+      }
+      this._scheduleFlavor();
+    }, next * 1000);
+  },
+
+  startAmbient() {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    this.engineGain.gain.setTargetAtTime(AUDIO.ENGINE_LEVEL, t, 0.6);
+    this.rumbleGain.gain.setTargetAtTime(AUDIO.RUMBLE_LEVEL, t, 0.8);
+    this.ambientBus.gain.setTargetAtTime(AUDIO.AMBIENT, t, 0.4);
+    if (this.honkTimer) clearTimeout(this.honkTimer);
+    if (this.flavorTimer) clearTimeout(this.flavorTimer);
+    this._crashing = false;
+    this._scheduleHonks();
+    this._scheduleFlavor();
+  },
+
+  // ================================================================ MUSIC ==
+  toggleStereo() {
+    if (!this.ready) this.init();
+    if (!this.ready) return false;
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+
+    this.stereoOn = !this.stereoOn;
+    const t = this.ctx.currentTime;
+    if (this.stereoOn) {
+      this.musicBus.gain.cancelScheduledValues(t);
+      this.musicBus.gain.setTargetAtTime(AUDIO.MUSIC, t, 0.10);
+      if (this.musicEl) {
+        // resume where it left off — the cassette is stuck in there
+        this.musicEl.play().catch(err => console.warn('[audio] play blocked', err));
+      } else {
+        this._startRiff();
+      }
+    } else {
+      this.musicBus.gain.cancelScheduledValues(t);
+      this.musicBus.gain.setTargetAtTime(0, t, 0.08);
+      // pause, never rewind
+      if (this.musicEl) setTimeout(() => { if (!this.stereoOn) this.musicEl.pause(); }, 160);
+      if (this.riffTimer) { clearTimeout(this.riffTimer); this.riffTimer = null; }
+    }
+    return this.stereoOn;
+  },
+
   _riffNote(time, freq, dur, gainVal) {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, time);
@@ -1433,21 +1689,18 @@ const Audio = {
     const curve = new Float32Array(1024);
     for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; curve[i] = Math.tanh(x * 4.5); }
     shaper.curve = curve;
-    for (const mult of [1, 1.4983, 2]) {          // root, fifth, octave
+    for (const mult of [1, 1.4983, 2]) {
       const o = this.ctx.createOscillator();
-      o.type = 'sawtooth';
-      o.frequency.value = freq * mult;
-      o.connect(shaper);
-      o.start(time); o.stop(time + dur + 0.05);
+      o.type = 'sawtooth'; o.frequency.value = freq * mult;
+      o.connect(shaper); o.start(time); o.stop(time + dur + 0.05);
     }
-    shaper.connect(g); g.connect(this.musicGain);
+    shaper.connect(g); g.connect(this.musicIn);
   },
 
   _startRiff() {
     const E2 = 82.41, G2 = 98.00, A2 = 110.00, D2 = 73.42;
     const pattern = [E2, E2, G2, E2, A2, A2, G2, D2];
-    let step = 0;
-    let next = this.ctx.currentTime + 0.05;
+    let step = 0, next = this.ctx.currentTime + 0.05;
     const beat = 0.30;
     const tick = () => {
       if (!this.stereoOn) return;
@@ -1462,60 +1715,41 @@ const Audio = {
     tick();
   },
 
-  toggleStereo() {
-    if (!this.ready) return;
-    this.stereoOn = !this.stereoOn;
-    const t = this.ctx.currentTime;
-    if (this.stereoOn) {
-      this.musicGain.gain.cancelScheduledValues(t);
-      this.musicGain.gain.setTargetAtTime(0.34, t, 0.10);
-      if (this.musicEl) this.musicEl.play().catch(() => {});
-      else this._startRiff();
-    } else {
-      this.musicGain.gain.cancelScheduledValues(t);
-      this.musicGain.gain.setTargetAtTime(0.0, t, 0.08);
-      // the cassette is stuck in there: pause, never rewind
-      if (this.musicEl) setTimeout(() => { if (!this.stereoOn) this.musicEl.pause(); }, 140);
-      if (this.riffTimer) { clearTimeout(this.riffTimer); this.riffTimer = null; }
-    }
-    return this.stereoOn;
-  },
-
+  // ========================================================= REACTIVE SFX ==
   setEngine(speed, gas) {
     if (!this.ready) return;
     const rpm = 0.55 + speed / CFG.MAX_SPEED * 1.5 + gas * 0.35;
-    for (const e of this.engineOsc) {
-      e.o.frequency.setTargetAtTime(e.base * rpm, this.ctx.currentTime, 0.12);
+    const t = this.ctx.currentTime;
+    for (const e of this.engineOsc) e.o.frequency.setTargetAtTime(e.base * rpm, t, 0.12);
+    if (!this._crashing) {
+      this.engineGain.gain.setTargetAtTime(AUDIO.ENGINE_LEVEL + gas * AUDIO.ENGINE_GAS_BOOST, t, 0.15);
     }
-    this.engineGain.gain.setTargetAtTime(0.16 + gas * 0.10, this.ctx.currentTime, 0.15);
   },
 
-  _noise(dur) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBuf;
-    src.loop = true;
-    src.start(); src.stop(this.ctx.currentTime + dur);
-    return src;
-  },
-
-  horn(variant = 0) {
+  // tyre squeal — used for the player's own brakes and for NPCs ahead
+  screech({ pan = 0, dist = 0, intensity = 1 } = {}) {
     if (!this.ready) return;
     const t = this.ctx.currentTime;
-    const base = [370, 415, 330, 466][variant % 4] * rand(0.97, 1.04);
-    const dur  = 0.28 + variant * 0.14 + rand(0, 0.2);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.16 + variant * 0.03, t + 0.03);
-    g.gain.setValueAtTime(0.16 + variant * 0.03, t + dur - 0.06);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    const atten = 1 / (1 + dist / 10);
+    const dur = 0.30 + intensity * 0.22;
+    const n = this._noise(dur + 0.05);
     const bp = this.ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = base * 2.2; bp.Q.value = 1.4;
-    for (const m of [1, 1.5, 2.02]) {
-      const o = this.ctx.createOscillator();
-      o.type = 'sawtooth'; o.frequency.value = base * m;
-      o.connect(bp); o.start(t); o.stop(t + dur + 0.03);
-    }
-    bp.connect(g); g.connect(this.master);
+    bp.type = 'bandpass'; bp.Q.value = 18 + intensity * 8;
+    bp.frequency.setValueAtTime(1900 + rand(-200, 200), t);
+    bp.frequency.linearRampToValueAtTime(3300 + rand(-300, 300), t + dur);
+    const g = this.ctx.createGain();
+    const peak = 0.13 * intensity * atten;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    const p = this._pan(pan);
+    n.connect(bp); bp.connect(g); g.connect(p); p.connect(this.sfxBus);
+  },
+
+  squeak() {
+    if (!this.ready || this._squeakUntil > this.ctx.currentTime) return;
+    this._squeakUntil = this.ctx.currentTime + 0.85;
+    this.screech({ pan: -0.15, dist: 0, intensity: 1 });
   },
 
   thunk() {
@@ -1527,32 +1761,15 @@ const Audio = {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.5, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.20);
-    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.22);
+    o.connect(g); g.connect(this.sfxBus); o.start(t); o.stop(t + 0.22);
 
     const n = this._noise(0.09);
     const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
     const ng = this.ctx.createGain();
     ng.gain.setValueAtTime(0.35, t);
     ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
-    n.connect(lp); lp.connect(ng); ng.connect(this.master);
+    n.connect(lp); lp.connect(ng); ng.connect(this.sfxBus);
   },
-
-  squeak() {
-    if (!this.ready || this._squeakUntil > this.ctx.currentTime) return;
-    this._squeakUntil = this.ctx.currentTime + 0.9;
-    const t = this.ctx.currentTime;
-    const n = this._noise(0.42);
-    const bp = this.ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.Q.value = 22;
-    bp.frequency.setValueAtTime(2100, t);
-    bp.frequency.linearRampToValueAtTime(3500, t + 0.40);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.10, t + 0.06);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
-    n.connect(bp); bp.connect(g); g.connect(this.master);
-  },
-  _squeakUntil: 0,
 
   scrape() {
     if (!this.ready) return;
@@ -1563,40 +1780,123 @@ const Audio = {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.14, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
-    n.connect(bp); bp.connect(g); g.connect(this.master);
+    n.connect(bp); bp.connect(g); g.connect(this.sfxBus);
   },
 
+  glassTinkle(t0, atten = 1) {
+    for (let i = 0; i < 14; i++) {
+      const t = t0 + rand(0.02, 0.7);
+      const o = this.ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = rand(2400, 6200);
+      const g = this.ctx.createGain();
+      const pk = rand(0.015, 0.05) * atten;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(pk, t + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + rand(0.10, 0.30));
+      const p = this._pan(rand(-0.6, 0.6));
+      o.connect(g); g.connect(p); p.connect(this.sfxBus);
+      o.start(t); o.stop(t + 0.35);
+    }
+  },
+
+  // big layered crunch: noise burst + low thump + torn metal + glass
   crash() {
     if (!this.ready) return;
     const t = this.ctx.currentTime;
-    const n = this._noise(0.7);
-    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1800;
+
+    const n = this._noise(0.8);
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2200;
     const ng = this.ctx.createGain();
-    ng.gain.setValueAtTime(0.85, t);
-    ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
-    n.connect(lp); lp.connect(ng); ng.connect(this.master);
+    ng.gain.setValueAtTime(0.9, t);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
+    n.connect(lp); lp.connect(ng); ng.connect(this.sfxBus);
+
+    const thump = this.ctx.createOscillator(); thump.type = 'sine';
+    thump.frequency.setValueAtTime(120, t);
+    thump.frequency.exponentialRampToValueAtTime(32, t + 0.35);
+    const tg = this.ctx.createGain();
+    tg.gain.setValueAtTime(0.85, t);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+    thump.connect(tg); tg.connect(this.sfxBus); thump.start(t); thump.stop(t + 0.55);
 
     for (const f of [780, 1130, 1490, 2210]) {
       const o = this.ctx.createOscillator();
       o.type = 'square'; o.frequency.value = f * rand(0.96, 1.05);
       const g = this.ctx.createGain();
-      g.gain.setValueAtTime(0.09, t);
+      g.gain.setValueAtTime(0.085, t);
       g.gain.exponentialRampToValueAtTime(0.0001, t + rand(0.9, 1.5));
-      o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 1.6);
+      o.connect(g); g.connect(this.sfxBus); o.start(t); o.stop(t + 1.6);
     }
-    setTimeout(() => this.horn(3), 260);
+    this.glassTinkle(t + 0.06, 1);
   },
 
-  duckForCrash() {
+  // far-off pileup: muffled, then everyone out there leans on the horn
+  distantCrash() {
     if (!this.ready) return;
     const t = this.ctx.currentTime;
-    this.engineGain.gain.setTargetAtTime(0.0, t, 0.3);
-    this.rumbleGain.gain.setTargetAtTime(0.02, t, 0.4);
-    this.musicGain.gain.setTargetAtTime(0.0, t, 0.5);
-    if (this.riffTimer) { clearTimeout(this.riffTimer); this.riffTimer = null; }
-    this.stereoOn = false;
-    if (this.musicEl) setTimeout(() => this.musicEl.pause(), 600);
+    const pan = rand(-0.9, 0.9);
+    const n = this._noise(0.7);
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 620;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.16, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+    const p = this._pan(pan);
+    n.connect(lp); lp.connect(g); g.connect(p); p.connect(this.ambientBus);
+
+    const thump = this.ctx.createOscillator(); thump.type = 'sine';
+    thump.frequency.setValueAtTime(90, t);
+    thump.frequency.exponentialRampToValueAtTime(38, t + 0.4);
+    const tg = this.ctx.createGain();
+    tg.gain.setValueAtTime(0.18, t);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+    const p2 = this._pan(pan);
+    thump.connect(tg); tg.connect(p2); p2.connect(this.ambientBus);
+    thump.start(t); thump.stop(t + 0.6);
+
+    setTimeout(() => this.honkFlurry(Math.round(rand(3, 5))), 500);
   },
+
+  // ---------------------------------------------------- game-over sequence --
+  // crash -> silence -> one lone sad horn a long way off -> stats
+  crashSequence() {
+    if (!this.ready) return;
+    this._crashing = true;
+    const t = this.ctx.currentTime;
+
+    // cut the buttrock instantly
+    this.musicBus.gain.cancelScheduledValues(t);
+    this.musicBus.gain.setValueAtTime(0, t);
+    this.stereoOn = false;
+    if (this.riffTimer) { clearTimeout(this.riffTimer); this.riffTimer = null; }
+    if (this.musicEl) this.musicEl.pause();
+
+    // duck the world under the impact, then let it fall away to silence
+    this.ambientBus.gain.cancelScheduledValues(t);
+    this.ambientBus.gain.setTargetAtTime(AUDIO.AMBIENT * AUDIO.CRASH_DUCK, t, 0.12);
+    this.engineGain.gain.setTargetAtTime(0, t, 0.35);
+    this.rumbleGain.gain.setTargetAtTime(0, t, 0.5);
+    this.ambientBus.gain.setTargetAtTime(0, t + 0.9, 0.35);
+
+    this.crash();
+
+    // one lone, distant, defeated horn
+    setTimeout(() => {
+      if (!this.ready) return;
+      const tt = this.ctx.currentTime;
+      this.ambientBus.gain.setValueAtTime(AUDIO.AMBIENT, tt);
+      this.honkVoices = 0;
+      this.honk({ kind: 'sad', pan: rand(-0.5, 0.5), dist: 55, bus: this.ambientBus });
+    }, AUDIO.GAMEOVER_SAD_HONK_S * 1000);
+  },
+
+  stopAmbient() {
+    if (this.honkTimer) { clearTimeout(this.honkTimer); this.honkTimer = null; }
+    if (this.flavorTimer) { clearTimeout(this.flavorTimer); this.flavorTimer = null; }
+  },
+
+  suspend() { if (this.ctx && this.ctx.state === 'running') this.ctx.suspend(); },
+  resume()  { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
 };
 
 // =============================================================================
@@ -2057,8 +2357,25 @@ function bindInput() {
   addEventListener('resize', () => { layoutUI(); resizeRenderer(); });
   addEventListener('orientationchange', () => setTimeout(() => { layoutUI(); resizeRenderer(); }, 120));
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { input.gas = input.brake = input.left = input.right = false; }
+    if (document.hidden) {
+      input.gas = input.brake = input.left = input.right = false;
+      Audio.suspend();
+    } else if (state === 'play') {
+      Audio.resume();
+    }
   });
+
+  // Belt and braces for the autoplay policy: the very first gesture anywhere
+  // unlocks the context, whichever surface it lands on.
+  const firstGesture = () => {
+    Audio.unlock();
+    removeEventListener('pointerdown', firstGesture);
+    removeEventListener('touchend', firstGesture);
+    removeEventListener('keydown', firstGesture);
+  };
+  addEventListener('pointerdown', firstGesture, { passive: true });
+  addEventListener('touchend',    firstGesture, { passive: true });
+  addEventListener('keydown',     firstGesture);
 }
 
 // =============================================================================
@@ -2086,12 +2403,10 @@ function startGame() {
   for (const lane of lanes) for (const car of lane.cars) disposeCar(car);
   buildTraffic();
 
-  Audio.init();
-  if (Audio.ctx && Audio.ctx.state === 'suspended') Audio.ctx.resume();
-  if (Audio.ready) {
-    Audio.engineGain.gain.setTargetAtTime(0.16, Audio.ctx.currentTime, 0.5);
-    Audio.rumbleGain.gain.setTargetAtTime(0.10, Audio.ctx.currentTime, 0.5);
-  }
+  // This runs from a click/tap, which is the only place iOS will let a context
+  // start. unlock() resumes and plays a 1-sample buffer to satisfy Safari.
+  Audio.unlock();
+  Audio.startAmbient();
   state = 'play';
 }
 
@@ -2100,8 +2415,9 @@ function gameOver(relSpeed, car) {
   state = 'over';
   stats.impact = relSpeed;
   input.gas = input.brake = false;
-  Audio.crash();
-  Audio.duckForCrash();
+  // crash -> the world falls silent -> one lone distant horn -> the form
+  Audio.stopAmbient();
+  Audio.crashSequence();
   shake(1.6);
 
   const mph = relSpeed / MPH;
@@ -2124,7 +2440,8 @@ function gameOver(relSpeed, car) {
     `Operator failed to maintain a safe following distance and struck ${what} at ${mph.toFixed(1)} mph. ` +
     `Total forward progress at time of incident: ${feet.toFixed(0)} feet. Coverage denied.`;
 
-  setTimeout(() => { document.getElementById('over').hidden = false; }, 620);
+  setTimeout(() => { document.getElementById('over').hidden = false; },
+             AUDIO.GAMEOVER_STATS_S * 1000);
 }
 
 // =============================================================================
@@ -2192,7 +2509,7 @@ function frame(now) {
     checkCollisions();
     updateHonking(dt);
     Audio.setEngine(player.speed, player.gas);
-    if (player.brake > 0.55 && player.speed > 0.8) Audio.squeak();
+    if (player.brake > 0.55 && player.speed > AUDIO.BRAKE_SQUEAK_MIN_MPH * MPH) Audio.squeak();
   }
 
   updateScenery();
