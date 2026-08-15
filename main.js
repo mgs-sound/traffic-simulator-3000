@@ -496,16 +496,13 @@ function segmentSheet(canvas, rows, perRow) {
 function buildCarVariants(canvas, cells, { turned = false } = {}) {
   const W = canvas.width, H = canvas.height;
   const inset = SEGMENT.UV_INSET_PX;
-  const t = ATLAS.TURN_ANGLE_DEG * Math.PI / 180;
   const variants = [];
 
   for (let r = 0; r < ATLAS.ROWS; r++) {
     const rowDef = ATLAS.ROWS_DEF[r];
     if (!rowDef) continue;
-    // A turned sprite's silhouette is wider than the vehicle itself.
-    const realW = turned
-      ? rowDef.width * Math.cos(t) + rowDef.length * Math.sin(t)
-      : rowDef.width;
+    // Only meaningful for the rear view; turned sprites are fitted by height.
+    const realW = rowDef.width;
 
     ATLAS.COLORS.forEach((colour, ci) => {
       const off = cells.find(c => c.row === r && c.col === ci * 2);
@@ -523,7 +520,24 @@ function buildCarVariants(canvas, cells, { turned = false } = {}) {
       }
       const coreW = off.core.w, coreH = off.core.h;
       const winW = padL + coreW + padR, winH = padT + coreH + padB;
-      const pxPerM = coreW / realW;
+
+      // Fit the measured body box to the world table. Using width alone lets a
+      // bad art scale blow a vehicle up to 2-3x its neighbours.
+      //
+      // Rear view: fit both axes (geometric mean) — the silhouette is
+      // yaw-invariant so width and height should agree, and disagreement is
+      // art error worth splitting.
+      // Turned view: fit HEIGHT ONLY. The 3/4 sheet draws each colour at a
+      // slightly different yaw, which legitimately changes projected width but
+      // never roof height. Fitting width here would make identical cars
+      // different sizes.
+      const sW = coreW / realW, sH = coreH / rowDef.height;
+      const pxPerM = turned ? sH : Math.sqrt(sW * sH);
+      const skew = Math.abs(sW / sH - 1);
+      if (!turned && skew > 0.12) {
+        console.warn(`[assets] ${rowDef.type}/${colour.name}: art aspect off by ` +
+                     `${(skew * 100).toFixed(0)}% vs the world table — fitted to the mean`);
+      }
 
       const uv = pair.map(c => {
         let x0 = c.core.x0 - padL, y0 = c.core.y0 - padT;
@@ -540,9 +554,10 @@ function buildCarVariants(canvas, cells, { turned = false } = {}) {
       const planeW = winW / pxPerM, planeH = winH / pxPerM;
       variants.push({
         type: rowDef.type, colour: colour.name,
-        width: rowDef.width, length: rowDef.length,
+        width: rowDef.width, height: rowDef.height, length: rowDef.length,
         planeW, planeH,
-        centreY: -(uv[0].footPx / pxPerM) + planeH / 2,
+        // distance from the plane's bottom edge up to the tyre contact patch
+        footOffset: uv[0].footPx / pxPerM,
         uv,
       });
     });
@@ -563,7 +578,8 @@ function buildPairVariant(canvas, cells, realWidth, meta) {
     padB = Math.max(padB, c.glow.y1 - c.core.y1);
   }
   const winW = padL + off.core.w + padR, winH = padT + off.core.h + padB;
-  const pxPerM = off.core.w / realWidth;
+  const sW = off.core.w / realWidth, sH = off.core.h / (meta.height || realWidth);
+  const pxPerM = Math.sqrt(sW * sH);
   const uv = [off, on].map(c => {
     const x0 = clamp(c.core.x0 - padL, c.limit[0] + inset, c.limit[1] - winW - inset);
     const y0 = clamp(c.core.y0 - padT, inset, H - winH - inset);
@@ -576,7 +592,7 @@ function buildPairVariant(canvas, cells, realWidth, meta) {
   const planeW = winW / pxPerM, planeH = winH / pxPerM;
   return Object.assign({
     planeW, planeH,
-    centreY: -(uv[0].footPx / pxPerM) + planeH / 2,
+    footOffset: uv[0].footPx / pxPerM,
     uv,
   }, meta);
 }
@@ -803,7 +819,6 @@ function scrollTex(canvas, mirrored) {
 }
 
 function buildScene() {
-  UNIT_QUAD = new THREE.PlaneGeometry(1, 1);
   scene = new THREE.Scene();
   scene.background = new THREE.Color(WORLD.SKY_HAZE);
   scene.fog = new THREE.Fog(new THREE.Color(WORLD.SKY_HAZE).getHex(), CFG.FOG_NEAR, CFG.FOG_FAR);
@@ -945,9 +960,20 @@ let semiAtlas = null;
 
 function laneX(i) { return (i - (CFG.LANE_COUNT - 1) / 2) * CFG.LANE_WIDTH; }
 
-// ONE unit-quad shared by every vehicle in the sim; real-world size comes from
-// mesh.scale, so switching between the rear and rear-3/4 atlas is free.
-let UNIT_QUAD = null;
+/**
+ * Bottom-anchored plane for a variant, built once and cached on it.
+ * The geometry is translated so the sprite's TYRE LINE sits at local y=0, so
+ * every mesh is simply placed at world y=0 and can never float or sink. Sizing
+ * is baked into the geometry — no mesh.scale, no screen-space scaling anywhere.
+ */
+function variantGeometry(variant) {
+  if (!variant.__geom) {
+    const g = new THREE.PlaneGeometry(variant.planeW, variant.planeH);
+    g.translate(0, variant.planeH / 2 - variant.footOffset, 0);
+    variant.__geom = g;
+  }
+  return variant.__geom;
+}
 
 function cloneAtlasTexture(atlas) {
   const t = atlas.texture.clone();   // shares .source — no second GPU upload
@@ -973,7 +999,7 @@ function spawnCar(laneIndex, s, forceSemi = false) {
   const mat = new THREE.MeshBasicMaterial({
     map: texRear, transparent: true, alphaTest: CFG.SPRITE_ALPHA_TEST, depthWrite: true,
   });
-  const mesh = new THREE.Mesh(UNIT_QUAD, mat);
+  const mesh = new THREE.Mesh(variantGeometry(variant), mat);
   scene.add(mesh);
 
   return {
@@ -1020,20 +1046,22 @@ function buildTraffic() {
 
   for (let i = 0; i < CFG.LANE_COUNT; i++) {
     const lane = lanes[i];
-    // ahead
-    let s = player.s + 7;
+    // ahead — adjacent lanes start beyond the dead zone so nothing spawns
+    // alongside the driver as a giant billboard
+    const isAdjacent = (i !== 1);
+    let s = player.s + (isAdjacent ? CFG.ADJACENT_DEAD_ZONE + CFG.ADJACENT_FADE_ZONE + 2 : 5);
     for (let k = 0; k < CFG.CAR_COUNT_AHEAD; k++) {
       const semiHere = (i === SEMI.lane && k === SEMI.slot);
-      const c = spawnCar(i, s, semiHere);
+      const c = spawnCar(i, s + (semiHere ? SEMI.length / 2 : 0), semiHere);
       lane.cars.push(c);
-      s += c.len + CFG.GAP_TARGET + rand(-0.8, 2.4);
+      s = c.s + c.len / 2 + Math.max(CFG.SPACING_TARGET - c.len / 2, CFG.CLEAR_MIN) + rand(0, 1.2);
     }
     // behind
-    let sb = player.s - CFG.PLAYER_LENGTH - CFG.GAP_TARGET - rand(0, 2);
+    let sb = player.s - CFG.PLAYER_LENGTH - CFG.SPACING_TARGET * 0.5 - rand(0, 1.5);
     for (let k = 0; k < CFG.CAR_COUNT_BEHIND; k++) {
       const c = spawnCar(i, sb);
       lane.cars.push(c);
-      sb -= c.len + CFG.GAP_TARGET + rand(-0.5, 2.0);
+      sb -= c.len + Math.max(CFG.SPACING_TARGET - c.len, CFG.CLEAR_MIN) + rand(0, 1.5);
     }
     lane.cars.sort((a, b) => b.s - a.s);
   }
@@ -1110,9 +1138,14 @@ function updateLane(lane, dt) {
       target = lane.leadTarget;
     } else {
       const lead = chain[i - 1];
-      const gap = (lead.s - lead.len / 2) - (car.s + car.len / 2);
-      target = clamp(lead.speed + (gap - CFG.GAP_TARGET) * CFG.K_GAP, 0, CFG.SURGE_SPEED * 1.05);
-      if (gap < CFG.GAP_MIN) target = 0;
+      const gap = (lead.s - lead.len / 2) - (car.s + car.len / 2);   // clear air
+      // Spacing is authored nose-to-nose; convert to the clear gap this
+      // particular pair needs, so a 16 m semi does not sit 7 m from a hatchback.
+      const half = (lead.len + car.len) / 2;
+      const wantClear = Math.max(CFG.SPACING_TARGET - half, CFG.CLEAR_MIN);
+      const minClear  = Math.max(CFG.SPACING_MIN    - half, CFG.CLEAR_PANIC);
+      target = clamp(lead.speed + (gap - wantClear) * CFG.K_GAP, 0, CFG.SURGE_SPEED * 1.05);
+      if (gap < minClear) target = 0;
     }
 
     const dv = target - car.speed;
@@ -1148,7 +1181,12 @@ function updateLane(lane, dt) {
     const c = cars[k];
     if (c.s < camS - CFG.RECYCLE_BEHIND && cars.length > 1) {
       const front = cars[0];
-      c.s = front.s + front.len / 2 + c.len / 2 + CFG.GAP_TARGET + rand(0, 3);
+      // Join the back of the queue ahead, but never closer than RESPAWN_MIN —
+      // a recycled car must never pop into existence near the camera.
+      const behindFront = front.s + front.len / 2 + c.len / 2
+                        + Math.max(CFG.SPACING_TARGET - (front.len + c.len) / 2, CFG.CLEAR_MIN)
+                        + rand(0, 2);
+      c.s = Math.max(behindFront, camS + rand(CFG.RESPAWN_MIN, CFG.RESPAWN_MAX));
       c.speed = front.speed;
       cars.splice(k, 1); cars.unshift(c);
     }
@@ -1157,7 +1195,8 @@ function updateLane(lane, dt) {
     const c = cars[k];
     if (c.s > camS + CFG.RECYCLE_AHEAD && cars.length > 1) {
       const back = cars[cars.length - 1];
-      c.s = back.s - back.len / 2 - c.len / 2 - CFG.GAP_TARGET - rand(0, 3);
+      c.s = back.s - back.len / 2 - c.len / 2
+           - Math.max(CFG.SPACING_TARGET - (back.len + c.len) / 2, CFG.CLEAR_MIN) - rand(0, 2);
       c.speed = back.speed;
       cars.splice(k, 1); cars.push(c);
       k--;
@@ -1172,9 +1211,23 @@ function updateCarVisuals() {
     const adjacent = lane.index !== player.lane0;
     for (const car of lane.cars) {
       const z = camS - car.s;
-      const visible = z < 2 && z > -CFG.RECYCLE_AHEAD;
+      let visible = z < 2 && z > -CFG.RECYCLE_AHEAD;
+
+      // Near-field rule: a camera-facing billboard alongside the driver is
+      // metres wide and reads as a giant blurry wall. Fade adjacent-lane cars
+      // out before they reach the camera and drop them entirely inside the
+      // dead zone.
+      let fade = 1;
+      if (visible && adjacent) {
+        const ahead = -z;                       // metres ahead of the camera
+        if (ahead < CFG.ADJACENT_DEAD_ZONE) { visible = false; }
+        else if (ahead < CFG.ADJACENT_DEAD_ZONE + CFG.ADJACENT_FADE_ZONE) {
+          fade = (ahead - CFG.ADJACENT_DEAD_ZONE) / CFG.ADJACENT_FADE_ZONE;
+        }
+      }
       car.mesh.visible = visible;
       if (!visible) continue;
+      if (car.mat.opacity !== fade) car.mat.opacity = fade;
 
       // Brake lights are a UV offset swap on a shared texture — never a
       // material swap (GDD §6).
@@ -1205,11 +1258,12 @@ function updateCarVisuals() {
           tex.offset.set(uv.offset[0], uv.offset[1]);
         }
         if (car.mat.map !== tex) { car.mat.map = tex; car.mat.needsUpdate = true; }
-        car.mesh.scale.set(src.planeW, src.planeH, 1);
-        car.viewCentreY = src.centreY;
+        // world-space size lives in the geometry, bottom-anchored at the tyres
+        car.mesh.geometry = variantGeometry(src);
       }
 
-      car.mesh.position.set(lx, car.viewCentreY, z);
+      // Lane centre, road surface, sim-driven z. Nothing else touches x or y.
+      car.mesh.position.set(lx, 0, z);
       car.mesh.rotation.y = (!car.v34 && adjacent && near && !car.isSemi)
         ? (lx < player.x ? -1 : 1) * CFG.ADJACENT_YAW_DEG * Math.PI / 180
         : 0;
@@ -2119,6 +2173,10 @@ function drawPedal(ctx, rect, cellIndex, label, pressed) {
   ctx.restore();
 }
 
+// Rearview mirror sizing: the car behind is rendered as if it sat between
+// these distances, so it stays small in the glass.
+const MIRROR_NEAR_M = 8, MIRROR_FAR_M = 15, MIRROR_MAX_H = 0.46;
+
 function drawMirror(ctx) {
   const R = ui.rect, M = COCKPIT.mirror;
   const x = R.x + M.x * R.w, y = R.y + M.y * R.h;
@@ -2149,13 +2207,16 @@ function drawMirror(ctx) {
     if (cell && cell.glow) {
       const b = cell.glow;
       const aspect = b.w / b.h;
-      const k = clamp(5.5 / (bestGap + 3.0), 0.10, 0.95);
-      let dw = w * k * 1.05;
-      let dh = dw / aspect;
-      if (dh > h * 0.88) { dh = h * 0.88; dw = dh * aspect; }
+      // Drawn as if the car behind were 8-15 m back, creeping between those
+      // bounds — small in the glass, never looming.
+      const shown = clamp(bestGap, MIRROR_NEAR_M, MIRROR_FAR_M);
+      const k = MIRROR_NEAR_M / shown;            // 1.0 at 8 m -> 0.53 at 15 m
+      let dh = h * MIRROR_MAX_H * k;
+      let dw = dh * aspect;
+      if (dw > w * 0.78) { dw = w * 0.78; dh = dw / aspect; }
       const dx = x + w * 0.5 - dw / 2;
-      const dy = y + h * 0.70 - dh * 0.70;
-      ctx.globalAlpha = clamp(1.15 - bestGap / 55, 0.25, 1);
+      const dy = y + h * 0.76 - dh;
+      ctx.globalAlpha = clamp(1.2 - bestGap / 60, 0.30, 1);
       ctx.drawImage(ART.frontsCanvas, b.x0, b.y0, b.w, b.h, dx, dy, dw, dh);
       ctx.globalAlpha = 1;
     }
@@ -2255,6 +2316,97 @@ function drawStereo(ctx) {
   ctx.restore();
 }
 
+// =============================================================================
+//  DEBUG OVERLAY (toggle: G). Default off. Draws lane centres, every NPC's
+//  world box with its z distance and lane index, and the adjacent-lane spawn
+//  dead zones. Screenshot-friendly.
+// =============================================================================
+
+let debugOn = false;
+const _v = new THREE.Vector3();
+
+function project(x, y, z) {
+  _v.set(x, y, z).project(camera);
+  return { x: (_v.x * 0.5 + 0.5) * ui.w, y: (-_v.y * 0.5 + 0.5) * ui.h, behind: _v.z > 1 };
+}
+
+function drawDebug(ctx) {
+  const camS = player.s - CFG.DRIVER_SETBACK;
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.textBaseline = 'bottom';
+
+  // --- lane centre lines ---
+  for (let i = 0; i < CFG.LANE_COUNT; i++) {
+    const lx = laneX(i);
+    ctx.strokeStyle = i === player.lane0 ? 'rgba(120,255,160,0.85)' : 'rgba(120,190,255,0.55)';
+    ctx.beginPath();
+    let started = false;
+    for (let d = 2; d <= 120; d += 2) {
+      const p = project(lx, 0.02, -d);
+      if (p.behind) continue;
+      started ? ctx.lineTo(p.x, p.y) : (ctx.moveTo(p.x, p.y), started = true);
+    }
+    ctx.stroke();
+  }
+
+  // --- adjacent-lane dead zone + fade band ---
+  for (const i of [0, 1, 2]) {
+    if (i === player.lane0) continue;
+    const lx = laneX(i);
+    for (const [d, col] of [[CFG.ADJACENT_DEAD_ZONE, 'rgba(255,80,80,0.9)'],
+                            [CFG.ADJACENT_DEAD_ZONE + CFG.ADJACENT_FADE_ZONE, 'rgba(255,190,70,0.75)']]) {
+      const a = project(lx - CFG.LANE_WIDTH * 0.45, 0.02, -d);
+      const b = project(lx + CFG.LANE_WIDTH * 0.45, 0.02, -d);
+      if (a.behind || b.behind) continue;
+      ctx.strokeStyle = col;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    const lbl = project(lx, 0.02, -CFG.ADJACENT_DEAD_ZONE);
+    if (!lbl.behind) {
+      ctx.fillStyle = 'rgba(255,80,80,0.95)';
+      ctx.fillText('dead zone', lbl.x - 26, lbl.y - 2);
+    }
+  }
+
+  // --- NPC boxes ---
+  for (const lane of lanes) {
+    const lx = laneX(lane.index);
+    for (const car of lane.cars) {
+      if (!car.mesh.visible) continue;
+      const z = camS - car.s;
+      const v = car.viewMode === 1 && car.v34 ? car.v34 : car.variant;
+      const hw = v.planeW / 2, ht = v.planeH - v.footOffset;
+      const c = [project(lx - hw, 0, z), project(lx + hw, 0, z),
+                 project(lx + hw, ht, z), project(lx - hw, ht, z)];
+      if (c.some(p => p.behind)) continue;
+      ctx.strokeStyle = car.braking ? 'rgba(255,90,70,0.95)' : 'rgba(255,255,255,0.65)';
+      ctx.beginPath();
+      ctx.moveTo(c[0].x, c[0].y);
+      for (let k = 1; k < 4; k++) ctx.lineTo(c[k].x, c[k].y);
+      ctx.closePath(); ctx.stroke();
+
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      const label = `L${lane.index} ${car.isSemi ? 'semi' : car.variant.type} ${(-z).toFixed(1)}m`;
+      const tw = ctx.measureText(label).width + 6;
+      ctx.fillRect(c[3].x, c[3].y - 14, tw, 14);
+      ctx.fillStyle = '#e8e4d8';
+      ctx.fillText(label, c[3].x + 3, c[3].y - 2);
+    }
+  }
+
+  // --- legend ---
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(8, 8, 250, 62);
+  ctx.fillStyle = '#e8e4d8';
+  ctx.fillText('DEBUG (G)  lane centres / NPC boxes', 14, 24);
+  ctx.fillText(`lane w ${CFG.LANE_WIDTH}m   spacing ${CFG.SPACING_TARGET}m n2n`, 14, 40);
+  ctx.fillText(`player lane ${player.lane0}  x ${player.x.toFixed(2)}m`, 14, 56);
+  ctx.fillText(`dead zone ${CFG.ADJACENT_DEAD_ZONE}m`, 14, 68);
+  ctx.restore();
+}
+
 function drawOverlay() {
   const ctx = ui.ctx;
   ctx.clearRect(0, 0, ui.w, ui.h);
@@ -2276,6 +2428,8 @@ function drawOverlay() {
   drawWheel(ctx, W.cx, W.cy, ui.wheelArtR || W.r, player.wheel);
   drawPedal(ctx, ui.hit.brake, 2, 'BRAKE', input.brake);
   drawPedal(ctx, ui.hit.gas,   0, 'GAS',   input.gas);
+
+  if (debugOn) drawDebug(ctx);
 }
 
 // =============================================================================
@@ -2299,6 +2453,7 @@ function bindInput() {
       case 'KeyA': case 'ArrowLeft':  input.left = true; e.preventDefault(); break;
       case 'KeyD': case 'ArrowRight': input.right = true; e.preventDefault(); break;
       case 'KeyS': if (state === 'play') Audio.toggleStereo(); break;
+      case 'KeyG': debugOn = !debugOn; break;
     }
   });
   addEventListener('keyup', e => {
@@ -2606,7 +2761,8 @@ async function boot() {
     semiAtlas = {
       texture: textureFrom(semiCanvas),
       variant: buildPairVariant(semiCanvas, cells, SEMI.width, {
-        type: 'semi', colour: 'white', width: SEMI.width, length: SEMI.length,
+        type: 'semi', colour: 'white',
+        width: SEMI.width, height: SEMI.height, length: SEMI.length,
       }),
     };
   }

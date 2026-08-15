@@ -45,8 +45,14 @@ export const CFG = {
                                  // (the rest just decay back to a crawl)
 
   // ------------------------------------------------------- NPC car-following --
-  GAP_TARGET:         6.0,  // m of clear air an NPC wants behind the car ahead
-  GAP_MIN:            1.5,  // m — inside this an NPC brakes at maximum
+  // Spacing is specified NOSE-TO-NOSE (centre-to-centre), because that is what
+  // reads as a queue on screen. A stopped car wants ~1.5 car lengths of it.
+  // The follow model works in clear air, so the per-pair clear gap is derived:
+  //     clear = SPACING_TARGET - (leadLength + ownLength) / 2
+  SPACING_TARGET:     7.0,  // m nose-to-nose when stopped (~1.5 car lengths)
+  SPACING_MIN:        5.5,  // m nose-to-nose floor outside a collision
+  CLEAR_MIN:          1.2,  // m of clear air never squeezed below (long vehicles)
+  CLEAR_PANIC:        0.5,  // m — inside this an NPC brakes at maximum
   K_GAP:              0.85, // P-gain on gap error
   NPC_ACCEL:          2.3,  // m/s²
   NPC_BRAKE_HARSHNESS: 9.5, // m/s² — NPCs brake harder than they accelerate,
@@ -60,12 +66,20 @@ export const CFG = {
   BUMP_RESTITUTION:   0.25, // how much a love tap bounces the player back
 
   // ------------------------------------------------------------ the world --
-  LANE_WIDTH:      3.70,
+  LANE_WIDTH:      3.60,
   LANE_COUNT:      3,
   CAR_COUNT_AHEAD: 8,   // per lane, visible ahead
   CAR_COUNT_BEHIND:3,   // per lane, behind (mirror dressing + they follow you)
   RECYCLE_BEHIND:  70,  // m behind the camera before a car is recycled forward
   RECYCLE_AHEAD:  420,  // m ahead before a car is recycled backward
+  RESPAWN_MIN:     80,  // recycled cars always reappear far away, never near
+  RESPAWN_MAX:    120,  //   the camera where they would pop in huge
+
+  // Adjacent-lane cars this close (or closer) to the camera are faded out and
+  // hidden. A camera-facing billboard alongside the driver is metres wide and
+  // reads as a giant blurry wall; there is nothing sensible to draw there.
+  ADJACENT_DEAD_ZONE: 4.0,   // m ahead of the camera
+  ADJACENT_FADE_ZONE: 3.0,   // m of fade above the dead zone
 
   // --------------------------------------------------------------- camera --
   CAM_HEIGHT:      1.15, // m above the road
@@ -161,18 +175,24 @@ export const ATLAS = {
   ROWS: 4,
   UV_INSET_PX: 1,   // guards against neighbour bleed once mipmapped
 
-  // Yaw of the rear-3/4 art, eyeballed from the sheet. A turned sprite's
-  // silhouette is WIDER than the vehicle: w*cos(t) + length*sin(t). Without
-  // this the 3/4 cars would be scaled to ~40% of their true size.
-  TURN_ANGLE_DEG: 32,
+  // NOTE: there is deliberately no turn-angle constant any more. Assuming a
+  // fixed 32 deg yaw and deriving width from w*cos+len*sin scaled the turned
+  // sprites to ~4.9 m — the "giant blurry pickup". The sheet's real yaw varies
+  // from roughly 5 to 13 deg per colour, so turned sprites are fitted by
+  // HEIGHT instead, which is yaw-invariant. See buildCarVariants().
 
-  // Row order, top -> bottom. Real-world dimensions drive the quad size; the
-  // sprite's measured alpha box is fitted to `width` at load.
+  // TRUE WORLD DIMENSIONS, in metres. Every sprite is a plane of exactly these
+  // dimensions placed in 3D — size attenuation is the perspective camera's job
+  // and nothing is ever scaled in screen space.
+  //
+  // `height` is authoritative: the measured sprite box is fitted to width AND
+  // height (geometric mean of the two scales) so a sloppy art aspect can never
+  // make one vehicle 2-3x its neighbours.
   ROWS_DEF: [
-    { type: 'sedan',  width: 1.82, length: 4.85 },
-    { type: 'suv',    width: 1.95, length: 4.79 },
-    { type: 'pickup', width: 2.03, length: 5.88 },
-    { type: 'hatch',  width: 1.75, length: 4.28 },
+    { type: 'sedan',  width: 1.80, height: 1.45, length: 4.85 },
+    { type: 'suv',    width: 1.90, height: 1.75, length: 4.79 },
+    { type: 'pickup', width: 1.95, height: 1.90, length: 5.88 },
+    { type: 'hatch',  width: 1.70, height: 1.50, length: 4.28 },
   ],
 
   // Column pairs, left -> right. Even col = brake OFF, odd col = brake ON.
@@ -212,7 +232,7 @@ export const STICKER = {
 
 export const SEMI = {
   width:  2.60,
-  height: 4.10,
+  height: 4.10,   // authoritative — it must tower over the 1.45-1.9 m cars
   length: 16.2,
   lane:   1,   // centre lane — maximum view blockage
   slot:   3,   // Nth car ahead of the player
