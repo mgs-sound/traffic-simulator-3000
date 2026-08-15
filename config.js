@@ -353,6 +353,37 @@ export const AUDIO = {
 };
 
 // =============================================================================
+//  SHARE CARD
+//  A 1200x630 PNG generated once per crash and handed to the native share
+//  sheet, with the stats image and a text line together.
+// =============================================================================
+
+export const SHARE = {
+  W: 1200,
+  H: 630,
+  BG: '#0b0d0f',            // matches the game-over screen
+
+  // Shown at the bottom of the card. A deployed copy uses its own origin;
+  // this is the fallback when running from localhost.
+  URL: 'github.com/mgs-sound/traffic-simulator-3000',
+
+  // Picked by time survived. `under` is an exclusive upper bound in seconds,
+  // so the bands are: <30s, 30s-2m, 2-5m, 5-10m, 10-20m, 20m+.
+  SUPERLATIVES: [
+    { under: 30,       text: 'Barely Commuted' },
+    { under: 120,      text: 'Certified Lane Occupant' },
+    { under: 300,      text: 'Regional Gridlock Finalist' },
+    { under: 600,      text: 'Distinguished Brake Rider' },
+    { under: 1200,     text: 'Senior Traffic Veteran' },
+    { under: Infinity, text: 'Absolutely Nowhere, Champion' },
+  ],
+
+  // Overrides the time band at any duration.
+  NOWHERE_FT: 50,
+  NOWHERE_TEXT: 'Went Nowhere. Proud of It.',
+};
+
+// =============================================================================
 //  WORLD ART
 //  Freeway_Wall.png is a single sheet holding three stacked strips. Bands are
 //  detected at load; these are the fallbacks and the real-world scaling.

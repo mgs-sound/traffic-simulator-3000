@@ -89,9 +89,12 @@
     background:#0b0d0f;
     opacity:0;transition:opacity 1.5s ease;
     text-align:center;
+    /* flex-start + margin:auto centres when there is room and scrolls from the
+       top when there is not — plain centring would clip the heading away. */
+    align-items:flex-start;overflow-y:auto;
   }
   #over.show{opacity:1;}
-  #over .over-inner{padding:24px;width:min(94vw,640px);}
+  #over .over-inner{margin:auto;padding:24px;width:min(94vw,640px);}
   #over .crashed{
     margin:0;
     font-size:clamp(32px,9vw,74px);
@@ -119,6 +122,34 @@
     background:#f2ede0;color:#0b0d0f;border:none;cursor:pointer;font-weight:700;
   }
   #ignition:active{transform:translateY(1px);}
+
+  #shareThumb{
+    display:block;margin:clamp(22px,5vw,32px) auto 0;
+    width:clamp(150px,42vw,230px);height:auto;
+    border:1px solid rgba(232,228,216,.18);
+    box-shadow:0 6px 22px rgba(0,0,0,.55);
+  }
+  #shareThumb[hidden]{display:none;}
+  #shareBtn{
+    display:block;margin:clamp(12px,3vw,16px) auto 0;
+    padding:11px clamp(16px,4vw,24px);
+    font-family:inherit;font-size:clamp(11px,2.6vw,14px);letter-spacing:.10em;
+    background:transparent;color:#9aa1a8;
+    border:1px solid rgba(154,161,168,.45);cursor:pointer;font-weight:700;
+  }
+  #shareBtn:hover,#shareBtn:focus-visible{color:#e8e4d8;border-color:rgba(232,228,216,.7);}
+  #shareBtn:active{transform:translateY(1px);}
+
+  #toast{
+    position:fixed;left:50%;bottom:clamp(18px,6vh,42px);transform:translateX(-50%);
+    z-index:30;padding:11px 20px;
+    background:rgba(20,24,29,.96);color:#e8e4d8;
+    border:1px solid rgba(232,228,216,.20);
+    font-size:clamp(11px,2.6vw,13px);letter-spacing:.06em;
+    opacity:0;transition:opacity .35s ease;pointer-events:none;
+  }
+  #toast.show{opacity:1;}
+  #toast[hidden]{display:none;}
 
   /* ---------- PWA gate + rotate blocker (mobile only) ---------- */
   /* While either is up, the game underneath is fully hidden. */
@@ -190,6 +221,22 @@
     font-size:14px;line-height:1.7;
   }
   #fatal code{background:#1b1f25;padding:2px 7px;color:#ffc14d;}
+
+  /* ---------- short viewports ----------
+     Phone landscape is the primary target and is only ~360px tall. Compact the
+     game-over screen so the heading and the share button both stay on screen.
+     This block MUST come last: it competes with the base rules above at equal
+     specificity, so source order is what decides it. */
+  @media (max-height:560px){
+    #over .over-inner{padding:10px 24px;}
+    #over .crashed{font-size:clamp(22px,5.6vw,36px);}
+    #over .lost{margin-top:4px;font-size:clamp(10px,2.2vw,12px);}
+    #over .stats{margin-top:10px;line-height:1.45;font-size:clamp(9px,2vw,11px);}
+    #ignition{margin-top:12px;padding:9px 20px;font-size:clamp(10px,2.4vw,13px);}
+    #shareThumb{margin-top:9px;width:clamp(96px,17vw,124px);}
+    #shareBtn{margin-top:7px;padding:6px 14px;font-size:clamp(9px,1.9vw,10px);}
+    #toast{bottom:10px;padding:8px 14px;}
+  }
 </style>
 </head>
 <body>
@@ -224,8 +271,12 @@
       <div><dt>Average speed:</dt><dd id="sAvg">0.0 mph</dd></div>
     </dl>
     <button id="ignition">GET BACK IN TRAFFIC</button>
+    <img id="shareThumb" alt="Your commute, as a shareable image" hidden>
+    <button id="shareBtn">SHARE YOUR COMMUTE</button>
   </div>
 </div>
+
+<div id="toast" hidden></div>
 
 <div id="pwaGate" hidden>
   <div class="gate-inner">

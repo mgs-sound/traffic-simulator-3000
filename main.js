@@ -10,7 +10,7 @@
 // =============================================================================
 
 import * as THREE from 'three';
-import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, MPH, FT } from './config.js';
+import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, SHARE, MPH, FT } from './config.js';
 
 // ---------------------------------------------------------------- utilities --
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -2600,6 +2600,9 @@ function gameOver(relSpeed, car) {
   document.getElementById('sTop').textContent  = `${Math.round(stats.topSpeed / MPH)} mph`;
   document.getElementById('sAvg').textContent  = `${avg.toFixed(1)} mph`;
 
+  // one render per crash, ready long before anyone taps share
+  buildShareCard(stats.time, feet, stats.topSpeed / MPH, avg);
+
   // Hold on the freeze-frame, then fade in so the lone distant horn lands as
   // the screen arrives.
   const over = document.getElementById('over');
@@ -2608,6 +2611,183 @@ function gameOver(relSpeed, car) {
     void over.offsetWidth;          // force a reflow so the transition runs.
     over.classList.add('show');     // (rAF would be throttled in a hidden tab)
   }, AUDIO.GAMEOVER_FADE_START_S * 1000);
+}
+
+// =============================================================================
+//  SHARE CARD
+//  1200x630 PNG built once per crash, handed to the native share sheet with a
+//  matching text line. Desktop browsers cannot share files, so they download.
+// =============================================================================
+
+const share = { blob: null, objectURL: null, text: '', superlative: '' };
+
+function superlativeFor(seconds, feet) {
+  if (feet < SHARE.NOWHERE_FT) return SHARE.NOWHERE_TEXT;
+  for (const s of SHARE.SUPERLATIVES) if (seconds < s.under) return s.text;
+  return SHARE.SUPERLATIVES[SHARE.SUPERLATIVES.length - 1].text;
+}
+
+function shareURL() {
+  const h = location.hostname;
+  if (!h || h === 'localhost' || h === '127.0.0.1' || location.protocol === 'file:') {
+    return SHARE.URL;
+  }
+  return (location.host + location.pathname).replace(/index\.html$/, '').replace(/\/$/, '');
+}
+
+// Shrink until it fits: the superlative must never overflow the card.
+function fitFont(ctx, text, maxW, startPx, weight, family) {
+  let px = startPx;
+  for (; px > 12; px -= 1) {
+    ctx.font = `${weight} ${px}px ${family}`;
+    if (ctx.measureText(text).width <= maxW) break;
+  }
+  return px;
+}
+
+function drawShareCard(secs, feet, topMph, avgMph) {
+  const W = SHARE.W, H = SHARE.H;
+  const c = makeCanvas(W, H), ctx = c.getContext('2d');
+  const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  const SANS = 'ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif';
+
+  ctx.fillStyle = SHARE.BG;
+  ctx.fillRect(0, 0, W, H);
+
+  // --- brake-light glow along the bottom edge ---
+  const glow = ctx.createLinearGradient(0, H - 110, 0, H);
+  glow.addColorStop(0, 'rgba(255,40,20,0)');
+  glow.addColorStop(1, 'rgba(255,42,20,0.22)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, H - 110, W, 110);
+  for (let i = 0; i < 7; i++) {
+    const gx = (i + 0.5) * (W / 7);
+    const g = ctx.createRadialGradient(gx, H, 0, gx, H, 130);
+    g.addColorStop(0, 'rgba(255,60,32,0.20)');
+    g.addColorStop(1, 'rgba(255,60,32,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(gx - 130, H - 130, 260, 130);
+  }
+
+  let y = 44;
+
+  // --- title ---
+  if (ART.title) {
+    const tw = 420, th = tw * (ART.title.naturalHeight / ART.title.naturalWidth);
+    ctx.drawImage(ART.title, (W - tw) / 2, y, tw, th);
+    y += th + 26;
+  } else {
+    ctx.fillStyle = '#f2ede0';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const px = fitFont(ctx, 'TRAFFIC SIMULATOR 3000', W - 160, 58, 700, SANS);
+    ctx.fillText('TRAFFIC SIMULATOR 3000', W / 2, y);
+    y += px + 30;
+  }
+
+  // --- superlative ---
+  const sup = share.superlative;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const supPx = fitFont(ctx, sup, W - 130, 62, 700, SANS);
+  ctx.fillStyle = '#ffc14d';
+  ctx.fillText(sup, W / 2, y);
+  y += supPx + 44;
+
+  // --- stats block ---
+  const rows = [
+    ['Time in traffic:', fmtClock(secs)],
+    ['Distance:',        `${feet.toFixed(0)} ft`],
+    ['Top speed:',       `${Math.round(topMph)} mph`],
+    ['Average speed:',   `${avgMph.toFixed(1)} mph`],
+  ];
+  const boxW = 620, x0 = (W - boxW) / 2, rowH = 40;
+  ctx.font = `500 27px ${MONO}`;
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < rows.length; i++) {
+    const ry = y + i * rowH + rowH / 2;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#9aa1a8';
+    ctx.fillText(rows[i][0], x0, ry);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#e8e4d8';
+    ctx.font = `700 27px ${MONO}`;
+    ctx.fillText(rows[i][1], x0 + boxW, ry);
+    ctx.font = `500 27px ${MONO}`;
+  }
+  y += rows.length * rowH;
+
+  // --- url ---
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = `500 22px ${MONO}`;
+  ctx.fillStyle = 'rgba(154,161,168,0.85)';
+  ctx.fillText(shareURL(), W / 2, H - 42);
+
+  return c;
+}
+
+// Built once per crash, never per tap.
+function buildShareCard(secs, feet, topMph, avgMph) {
+  share.superlative = superlativeFor(secs, feet);
+  share.text = `${share.superlative} — ${feet.toFixed(0)} ft in ${fmtClock(secs)}.`;
+
+  const canvas = drawShareCard(secs, feet, topMph, avgMph);
+
+  if (share.objectURL) { URL.revokeObjectURL(share.objectURL); share.objectURL = null; }
+  share.blob = null;
+
+  // hide the previous run's thumbnail so a stale card never flashes
+  const thumb = document.getElementById('shareThumb');
+  if (thumb) { thumb.hidden = true; thumb.removeAttribute('src'); }
+
+  canvas.toBlob(blob => {
+    if (!blob) { console.warn('[share] toBlob failed'); return; }
+    share.blob = blob;
+    share.objectURL = URL.createObjectURL(blob);
+    if (thumb) { thumb.src = share.objectURL; thumb.hidden = false; }
+  }, 'image/png');
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => { el.hidden = true; }, 400);
+  }, 2200);
+}
+
+async function doShare() {
+  if (!share.blob) { toast('Still rendering'); return; }
+  const file = new File([share.blob], 'traffic-simulator-3000.png', { type: 'image/png' });
+  const payload = {
+    files: [file],
+    title: 'Traffic Simulator 3000',
+    text: share.text,
+  };
+
+  if (navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
+    try {
+      await navigator.share(payload);
+      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;   // user dismissed the sheet
+      console.info('[share] share() failed, downloading instead:', err && err.message);
+    }
+  }
+
+  // Fallback: save the PNG. No clipboard gymnastics.
+  const a = document.createElement('a');
+  a.href = share.objectURL;
+  a.download = 'traffic-simulator-3000.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast('Image saved');
 }
 
 // =============================================================================
@@ -2720,6 +2900,7 @@ async function boot() {
   ART.road    = roadImg;
   ART.wall    = wallImg;
   ART.sign    = signImg;
+  ART.title   = titleImg;   // reused by the share card
 
   // music availability probe
   ART.musicOk = await new Promise(res => {
@@ -2817,11 +2998,16 @@ async function boot() {
 
   document.getElementById('start').addEventListener('click', startGame);
   document.getElementById('ignition').addEventListener('click', e => { e.stopPropagation(); startGame(); });
+  document.getElementById('shareBtn').addEventListener('click', e => {
+    e.stopPropagation();   // must stay inside the gesture for navigator.share
+    doShare();
+  });
 
   // Debug handle. `stepSim` advances the simulation without rendering, which
   // makes the wave engine testable at fixed timesteps instead of by eye.
   window.__ts3 = {
     player, lanes, stats, input, Audio, CFG, ART, carAtlas, car34Atlas, semiAtlas,
+    share, superlativeFor, buildShareCard, drawShareCard, doShare, shareURL,
     get state() { return state; },
     begin: () => startGame(),
     stepSim(dt) {
