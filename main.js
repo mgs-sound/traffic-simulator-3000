@@ -2548,7 +2548,9 @@ function shake(a) { shakeAmt = Math.max(shakeAmt, a); }
 
 function startGame() {
   document.getElementById('start').hidden = true;
-  document.getElementById('over').hidden = true;
+  const over = document.getElementById('over');
+  over.classList.remove('show');    // reset the fade for the next crash
+  over.hidden = true;
   resetPlayer();
   stats.time = 0; stats.startS = player.s; stats.bumps = 0; stats.honks = 0;
   stats.topSpeed = 0; stats.lastBump = -9; stats.lastScrape = -9; stats.impact = 0;
@@ -2575,28 +2577,23 @@ function gameOver(relSpeed, car) {
   Audio.crashSequence();
   shake(1.6);
 
-  const mph = relSpeed / MPH;
   const feet = Math.max(0, (player.s - stats.startS) * FT);
   const avg  = stats.time > 0 ? (feet / FT) / stats.time / MPH : 0;
 
-  document.getElementById('claimNo').textContent =
-    String(100000 + Math.floor(Math.random() * 899999));
-  document.getElementById('sTime').textContent   = fmtClock(stats.time);
-  document.getElementById('sDist').textContent   = `${feet.toFixed(0)} ft`;
-  document.getElementById('sAvg').textContent    = `${avg.toFixed(1)} mph`;
-  document.getElementById('sTop').textContent    = `${(stats.topSpeed / MPH).toFixed(1)} mph`;
-  document.getElementById('sBumps').textContent  = String(stats.bumps);
-  document.getElementById('sHonks').textContent  = String(stats.honks);
-  document.getElementById('sImpact').textContent = `${mph.toFixed(1)} mph`;
+  // The stats are the joke. Format them plainly and get out of the way.
+  document.getElementById('sTime').textContent = fmtClock(stats.time);
+  document.getElementById('sDist').textContent = `${feet.toFixed(0)} ft`;
+  document.getElementById('sTop').textContent  = `${Math.round(stats.topSpeed / MPH)} mph`;
+  document.getElementById('sAvg').textContent  = `${avg.toFixed(1)} mph`;
 
-  const what = car && car.isSemi ? 'the rear of a tractor-trailer'
-             : car ? `the rear of a ${car.variant.colour} ${car.variant.type}` : 'another vehicle';
-  document.getElementById('verdict').textContent =
-    `Operator failed to maintain a safe following distance and struck ${what} at ${mph.toFixed(1)} mph. ` +
-    `Total forward progress at time of incident: ${feet.toFixed(0)} feet. Coverage denied.`;
-
-  setTimeout(() => { document.getElementById('over').hidden = false; },
-             AUDIO.GAMEOVER_STATS_S * 1000);
+  // Hold on the freeze-frame, then fade in so the lone distant horn lands as
+  // the screen arrives.
+  const over = document.getElementById('over');
+  setTimeout(() => {
+    over.hidden = false;
+    void over.offsetWidth;          // force a reflow so the transition runs.
+    over.classList.add('show');     // (rAF would be throttled in a hidden tab)
+  }, AUDIO.GAMEOVER_FADE_START_S * 1000);
 }
 
 // =============================================================================

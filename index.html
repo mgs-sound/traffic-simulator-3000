@@ -80,51 +80,39 @@
     line-height:1.8;letter-spacing:.04em;
   }
 
-  /* ---------- GAME OVER : insurance form ---------- */
-  #over{background:rgba(6,8,10,.72);backdrop-filter:blur(2px);}
-  #over .form{
-    width:min(94vw,560px);max-height:94vh;overflow:auto;
-    background:var(--paper);color:var(--ink);
-    padding:clamp(14px,3.4vw,26px);
-    border:1px solid #a09a88;
-    box-shadow:0 18px 60px rgba(0,0,0,.7);
-    transform:rotate(-.5deg);
-    background-image:linear-gradient(rgba(0,0,0,.028) 1px,transparent 1px);
-    background-size:100% 22px;
+  /* ---------- GAME OVER ---------- */
+  #over{
+    background:#0b0d0f;
+    opacity:0;transition:opacity 1.5s ease;
+    text-align:center;
   }
-  #over .hdr{
-    display:flex;justify-content:space-between;align-items:flex-start;
-    gap:10px;border-bottom:2px solid var(--ink);padding-bottom:8px;
+  #over.show{opacity:1;}
+  #over .over-inner{padding:24px;width:min(94vw,640px);}
+  #over .crashed{
+    margin:0;
+    font-size:clamp(32px,9vw,74px);
+    line-height:1;letter-spacing:.01em;font-weight:700;
+    color:#f2ede0;white-space:nowrap;
   }
-  #over .hdr h2{
-    margin:0;font-size:clamp(11px,2.6vw,14px);
-    letter-spacing:.06em;font-weight:700;text-transform:uppercase;
+  #over .lost{
+    margin:14px 0 0;
+    font-size:clamp(13px,3.2vw,19px);
+    color:#8b9299;font-weight:400;
   }
-  #over .hdr .no{font-size:clamp(9px,2vw,11px);opacity:.72;text-align:right;white-space:nowrap;}
-  #over .stamp{
-    margin:16px 0 14px;text-align:center;
-    color:var(--red);border:3px double var(--red);
-    padding:9px 6px;transform:rotate(-1.4deg);
-    font-size:clamp(15px,4.6vw,29px);letter-spacing:.09em;font-weight:700;
+  #over .stats{
+    margin:clamp(30px,7vw,48px) auto 0;
+    display:inline-block;text-align:left;
+    font-size:clamp(11px,2.7vw,14px);
+    color:#9aa1a8;line-height:1.9;
   }
-  #over table{width:100%;border-collapse:collapse;font-size:clamp(10px,2.4vw,13px);}
-  #over td{padding:6px 4px;border-bottom:1px dotted #8d8878;vertical-align:baseline;}
-  #over td.k{text-transform:uppercase;letter-spacing:.05em;opacity:.7;width:56%;}
-  #over td.v{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;}
-  #over .note{
-    margin:14px 0 4px;font-size:clamp(9px,2.1vw,11px);
-    line-height:1.6;opacity:.72;border-top:1px solid #b3ad9c;padding-top:10px;
-  }
-  #over .sig{
-    margin-top:12px;font-size:clamp(9px,2vw,11px);opacity:.6;
-    display:flex;justify-content:space-between;gap:12px;
-  }
-  #over .sig span{border-bottom:1px solid var(--ink);flex:1;padding-bottom:2px;}
+  #over .stats div{display:flex;justify-content:space-between;gap:clamp(18px,6vw,54px);}
+  #over .stats dt{margin:0;}
+  #over .stats dd{margin:0;color:#d8d4cc;font-variant-numeric:tabular-nums;}
   #ignition{
-    display:block;width:100%;margin-top:18px;padding:15px 10px;
-    font-family:inherit;font-size:clamp(12px,3.2vw,17px);letter-spacing:.16em;
-    background:var(--ink);color:var(--paper);border:none;cursor:pointer;
-    font-weight:700;
+    display:block;margin:clamp(30px,7vw,48px) auto 0;
+    padding:16px clamp(20px,5vw,34px);
+    font-family:inherit;font-size:clamp(13px,3.2vw,18px);letter-spacing:.10em;
+    background:#f2ede0;color:#0b0d0f;border:none;cursor:pointer;font-weight:700;
   }
   #ignition:active{transform:translateY(1px);}
 
@@ -159,27 +147,16 @@
 </div>
 
 <div class="screen" id="over" hidden>
-  <div class="form">
-    <div class="hdr">
-      <h2>Motor Vehicle<br>Incident Report</h2>
-      <div class="no">FORM MV-3000<br>CLAIM <span id="claimNo">000000</span></div>
-    </div>
-    <div class="stamp">COMMUTE TERMINATED</div>
-    <table>
-      <tr><td class="k">Time in traffic</td><td class="v" id="sTime">00:00</td></tr>
-      <tr><td class="k">Distance travelled</td><td class="v" id="sDist">0 ft</td></tr>
-      <tr><td class="k">Average speed</td><td class="v" id="sAvg">0.0 mph</td></tr>
-      <tr><td class="k">Top speed attained</td><td class="v" id="sTop">0.0 mph</td></tr>
-      <tr><td class="k">Minor contacts (love taps)</td><td class="v" id="sBumps">0</td></tr>
-      <tr><td class="k">Horns directed at operator</td><td class="v" id="sHonks">0</td></tr>
-      <tr><td class="k">Impact speed</td><td class="v" id="sImpact">0.0 mph</td></tr>
-      <tr><td class="k">Fault</td><td class="v">OPERATOR</td></tr>
-    </table>
-    <p class="note" id="verdict">
-      Operator failed to maintain a safe following distance.
-    </p>
-    <div class="sig"><span>OPERATOR SIGNATURE</span><span>DATE</span></div>
-    <button id="ignition">IGNITION</button>
+  <div class="over-inner">
+    <h2 class="crashed">YOU CRASHED</h2>
+    <p class="lost">and lost the game</p>
+    <dl class="stats">
+      <div><dt>Time in traffic:</dt><dd id="sTime">00:00</dd></div>
+      <div><dt>Distance:</dt><dd id="sDist">0 ft</dd></div>
+      <div><dt>Top speed:</dt><dd id="sTop">0 mph</dd></div>
+      <div><dt>Average speed:</dt><dd id="sAvg">0.0 mph</dd></div>
+    </dl>
+    <button id="ignition">GET BACK IN TRAFFIC</button>
   </div>
 </div>
 

@@ -344,10 +344,12 @@ export const AUDIO = {
   NPC_SCREECH_RANGE: 40,    // m
   NPC_SCREECH_COOLDOWN: 2.5,
 
-  // --- game over beat: crash, silence, one lone sad horn, then the form ---
+  // --- game over beat: crash, silence, one lone sad horn ---
+  // The screen starts a 1.5 s fade at FADE_START, so the horn at 2.6 s lands
+  // partway through the fade, as the words arrive.
   CRASH_DUCK: 0.15,
-  GAMEOVER_SAD_HONK_S: 2.6,
-  GAMEOVER_STATS_S: 3.35,
+  GAMEOVER_FADE_START_S: 1.80,
+  GAMEOVER_SAD_HONK_S:   2.60,
 };
 
 // =============================================================================
