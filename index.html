@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#87a0b8">
+<meta name="theme-color" content="#1a1d21">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Traffic Sim">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./assets/icon-192.png">
 <title>TRAFFIC SIMULATOR 3000</title>
 <style>
   :root{
@@ -116,6 +120,69 @@
   }
   #ignition:active{transform:translateY(1px);}
 
+  /* ---------- PWA gate + rotate blocker (mobile only) ---------- */
+  /* While either is up, the game underneath is fully hidden. */
+  html.gated #gl, html.gated #ui, html.gated #start, html.gated #over,
+  html.rotated #gl, html.rotated #ui, html.rotated #start, html.rotated #over{
+    display:none !important;
+  }
+
+  #pwaGate, #rotateBlock{
+    position:fixed;inset:0;z-index:20;
+    display:flex;align-items:center;justify-content:center;
+    text-align:center;
+    padding:calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom));
+    background:radial-gradient(ellipse at 50% 38%, #2c3742 0%, #14181d 62%, #07090b 100%);
+    color:#e8e4d8;
+  }
+  #pwaGate[hidden], #rotateBlock[hidden]{display:none;}
+
+  #pwaGate .gate-inner{width:min(94vw,560px);}
+  #pwaGate h1{
+    margin:0;font-size:clamp(21px,6.4vw,40px);line-height:1.08;
+    letter-spacing:.02em;color:#f2ede0;
+  }
+  #pwaGate .gate-sub{
+    margin:14px 0 0;font-size:clamp(12px,3vw,16px);
+    color:#8b9299;line-height:1.55;
+  }
+  #pwaGate .gate-how{
+    margin-top:clamp(26px,7vw,40px);
+    border-top:1px solid rgba(232,228,216,.14);padding-top:clamp(20px,5vw,28px);
+    font-size:clamp(12px,3vw,15px);color:#c2c7cc;line-height:1.7;
+  }
+  #pwaGate .gate-how[hidden]{display:none;}
+  #pwaGate .glyph{
+    display:inline-block;vertical-align:-2px;margin:0 2px;
+    width:1.05em;height:1.05em;fill:none;stroke:#ffc14d;stroke-width:1.7;
+    stroke-linecap:round;stroke-linejoin:round;
+  }
+  #installBtn{
+    display:block;margin:0 auto;padding:15px 30px;
+    font-family:inherit;font-size:clamp(13px,3.4vw,17px);font-weight:700;
+    letter-spacing:.10em;background:#ffc14d;color:#14181d;border:none;cursor:pointer;
+  }
+  #installBtn[hidden]{display:none;}
+  #installBtn:active{transform:translateY(1px);}
+  #androidManual[hidden]{display:none;}
+
+  /* rotate blocker */
+  #rotateBlock .rot-inner{width:min(90vw,420px);}
+  #rotateBlock .phone{
+    width:clamp(74px,22vw,110px);height:auto;margin:0 auto clamp(22px,6vw,34px);
+    display:block;stroke:#ffc14d;fill:none;stroke-width:5;
+    stroke-linecap:round;stroke-linejoin:round;
+    animation:tip 2s ease-in-out infinite;
+  }
+  @keyframes tip{
+    0%,42%{transform:rotate(0deg);}
+    58%,100%{transform:rotate(-90deg);}
+  }
+  #rotateBlock h2{
+    margin:0;font-size:clamp(17px,5vw,28px);letter-spacing:.10em;color:#f2ede0;
+  }
+  #rotateBlock p{margin:12px 0 0;font-size:clamp(11px,2.9vw,14px);color:#8b9299;}
+
   #fatal{
     position:fixed;inset:0;z-index:9;display:none;
     align-items:center;justify-content:center;padding:28px;
@@ -160,6 +227,45 @@
   </div>
 </div>
 
+<div id="pwaGate" hidden>
+  <div class="gate-inner">
+    <h1>ADD TO HOME SCREEN TO PLAY</h1>
+    <p class="gate-sub">This commute requires your full attention.</p>
+
+    <div class="gate-how" id="gateIOS" hidden>
+      Tap the Share button
+      <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 15V3"/><path d="M8 7l4-4 4 4"/>
+        <path d="M5 12v7a1 1 0 001 1h12a1 1 0 001-1v-7"/>
+      </svg>
+      , then &ldquo;Add to Home Screen&rdquo;
+    </div>
+
+    <div class="gate-how" id="gateAndroid" hidden>
+      <button id="installBtn" hidden>INSTALL</button>
+      <div id="androidManual">
+        Open the <strong>&#8942;</strong> menu, then &ldquo;Add to Home screen&rdquo;
+      </div>
+    </div>
+
+    <div class="gate-how" id="gateSafari" hidden>
+      This browser cannot install web apps.<br>
+      Open this page in <strong>Safari</strong>, then use Share &rarr; &ldquo;Add to Home Screen&rdquo;.
+    </div>
+  </div>
+</div>
+
+<div id="rotateBlock" hidden>
+  <div class="rot-inner">
+    <svg class="phone" viewBox="0 0 60 100" aria-hidden="true">
+      <rect x="6" y="4" width="48" height="92" rx="9"/>
+      <line x1="24" y1="88" x2="36" y2="88"/>
+    </svg>
+    <h2>ROTATE YOUR PHONE</h2>
+    <p>Traffic Simulator 3000 is played in landscape.</p>
+  </div>
+</div>
+
 <div id="fatal">
   <div>
     <strong>Three.js could not load.</strong><br><br>
@@ -174,11 +280,18 @@
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
 </script>
+<script type="module" src="./pwa.js"></script>
 <script type="module">
-  import('./main.js').catch(err => {
-    console.error(err);
-    document.getElementById('fatal').style.display = 'flex';
-  });
+  // The install gate must never be bypassable by the game booting behind it.
+  const pwa = window.__ts3pwa;
+  if (pwa && pwa.isMobile && !pwa.isStandalone) {
+    console.info('[pwa] install gate active — game not started');
+  } else {
+    import('./main.js').catch(err => {
+      console.error(err);
+      document.getElementById('fatal').style.display = 'flex';
+    });
+  }
 </script>
 </body>
 </html>

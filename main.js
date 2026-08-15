@@ -2520,6 +2520,19 @@ function bindInput() {
     }
   });
 
+  // The rotate blocker (pwa.js) freezes the sim and the soundscape while it is
+  // up, so a phone turned to portrait does not keep playing behind it.
+  addEventListener('ts3:pause', () => {
+    paused = true;
+    input.gas = input.brake = input.left = input.right = false;
+    Audio.suspend();
+  });
+  addEventListener('ts3:resume', () => {
+    paused = false;
+    last = performance.now();     // do not bank the wall-clock time spent paused
+    if (state === 'play') Audio.resume();
+  });
+
   // Belt and braces for the autoplay policy: the very first gesture anywhere
   // unlocks the context, whichever surface it lands on.
   const firstGesture = () => {
@@ -2538,6 +2551,7 @@ function bindInput() {
 // =============================================================================
 
 let state = 'start';   // start | play | over
+let paused = false;    // held up by the rotate blocker (see pwa.js)
 const stats = {
   time: 0, startS: 0, bumps: 0, honks: 0, topSpeed: 0,
   lastBump: -9, lastScrape: -9, impact: 0,
@@ -2654,7 +2668,7 @@ function frame(now) {
   const vw = Math.max(1, window.innerWidth | 0), vh = Math.max(1, window.innerHeight | 0);
   if (vw !== ui.w || vh !== ui.h) { layoutUI(); resizeRenderer(); }
 
-  if (state === 'play') {
+  if (state === 'play' && !paused) {
     stats.time += dt;
     updatePlayer(dt);
     for (const lane of lanes) updateLane(lane, dt);

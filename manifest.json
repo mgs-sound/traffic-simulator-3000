@@ -1,0 +1,16 @@
+{
+  "name": "Traffic Simulator 3000",
+  "short_name": "Traffic Sim",
+  "description": "First-person gridlock simulator. You never get anywhere.",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#1a1d21",
+  "theme_color": "#1a1d21",
+  "start_url": "./index.html",
+  "scope": "./",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
