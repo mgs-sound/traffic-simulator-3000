@@ -82,10 +82,23 @@ export const CFG = {
   ADJACENT_FADE_ZONE: 3.0,   // m of fade above the dead zone
 
   // --------------------------------------------------------------- camera --
-  CAM_HEIGHT:      1.15, // m above the road
-  CAM_X:          -0.36, // m left of car centreline (US left-hand drive)
-  DRIVER_SETBACK:  2.40, // m the driver sits behind the front bumper
-  FOV:            62,
+  // The camera is the DRIVER'S EYE, not the car's centre. It rides at
+  // player.x + CAMERA_SEAT_OFFSET_X so steering actually moves the view.
+  // The collision box stays centred on the car's true centreline.
+  CAMERA_HEIGHT:        1.15,  // m above the road
+  CAMERA_SEAT_OFFSET_X: -0.37, // m left of centreline (US left-hand drive)
+
+  // Camera-to-front-bumper distance. This is the whole of the "collision
+  // triggers too early" fix: player.s is the front bumper, and the camera sits
+  // this far behind it. Too large and you crash with daylight still showing.
+  PLAYER_FRONT_OVERHANG: 1.90,
+
+  // --------------------------------------------------------------- view ----
+  // The game renders into a fixed 16:9 rect, letterboxed on anything else, so
+  // the cockpit art and every touch target keep their exact relationship at any
+  // window shape. The FOV never changes with the window.
+  VIEW_ASPECT: 16 / 9,
+  FOV:         70,
   CAM_PITCH_DEG: -11.0,  // fixed downward pitch. A driver looks AT the bumper
                          // ahead, not at the sky. Tuned to HUD_Dashboard.png,
                          // whose window bottom sits at 52% of the frame: any
@@ -96,8 +109,15 @@ export const CFG = {
   FOG_FAR:       430,
 
   // ------------------------------------------------------- player geometry --
-  PLAYER_WIDTH:  1.86,
-  PLAYER_LENGTH: 4.90,
+  // Real footprint. player.s is the FRONT BUMPER; the body extends back
+  // PLAYER_LENGTH from there and is centred on player.x.
+  PLAYER_WIDTH:  1.82,
+  PLAYER_LENGTH: 4.60,
+  // Half-width of the collision box. Calibrated against the sprite footprint:
+  // a touch under half the body width so a shared lane line is not an instant
+  // scrape, but honest enough that a real overlap always registers.
+  PLAYER_SIDE_HALF_WIDTH: 0.86,
+  NPC_SIDE_SHRINK: 0.92,   // NPC half-widths are scaled by this for contact
 
   // ---------------------------------------------------------------- honking --
   HONK_LATERAL_TRIGGER: 0.62, // fraction of a lane-width of encroachment that

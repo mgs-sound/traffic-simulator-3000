@@ -824,7 +824,7 @@ function buildScene() {
   scene.fog = new THREE.Fog(new THREE.Color(WORLD.SKY_HAZE).getHex(), CFG.FOG_NEAR, CFG.FOG_FAR);
 
   camera = new THREE.PerspectiveCamera(CFG.FOV, 1, 0.1, 1600);
-  camera.position.set(CFG.CAM_X, CFG.CAM_HEIGHT, 0);
+  camera.position.set(CFG.CAMERA_SEAT_OFFSET_X, CFG.CAMERA_HEIGHT, 0);
 
   const strips = ART.wall ? detectStrips(ART.wall) : [];
   const haveStrips = strips.length >= 3;
@@ -1176,7 +1176,7 @@ function updateLane(lane, dt) {
 
   // --- recycling -------------------------------------------------------------
   cars.sort((a, b) => b.s - a.s);
-  const camS = player.s - CFG.DRIVER_SETBACK;
+  const camS = player.s - CFG.PLAYER_FRONT_OVERHANG;
   for (let k = cars.length - 1; k >= 0; k--) {
     const c = cars[k];
     if (c.s < camS - CFG.RECYCLE_BEHIND && cars.length > 1) {
@@ -1205,7 +1205,7 @@ function updateLane(lane, dt) {
 }
 
 function updateCarVisuals() {
-  const camS = player.s - CFG.DRIVER_SETBACK;
+  const camS = player.s - CFG.PLAYER_FRONT_OVERHANG;
   for (const lane of lanes) {
     const lx = laneX(lane.index);
     const adjacent = lane.index !== player.lane0;
@@ -1263,7 +1263,14 @@ function updateCarVisuals() {
       }
 
       // Lane centre, road surface, sim-driven z. Nothing else touches x or y.
-      car.mesh.position.set(lx, 0, z);
+      //
+      // The billboard is placed at the REAR BUMPER, not the car's centre: the
+      // sprite depicts the rear face, and putting that face half a car-length
+      // deep made every car look ~2m farther than it physically was — the
+      // "collision triggers too early" illusion. (3/4 views depict the whole
+      // flank, so those stay at the centre.)
+      const zBase = (car.viewMode === 1) ? z : z + car.len / 2;
+      car.mesh.position.set(lx, 0, zBase);
       car.mesh.rotation.y = (!car.v34 && adjacent && near && !car.isSemi)
         ? (lx < player.x ? -1 : 1) * CFG.ADJACENT_YAW_DEG * Math.PI / 180
         : 0;
@@ -1354,15 +1361,17 @@ function updatePlayer(dt) {
 
 function checkCollisions() {
   const tol = CFG.BUMP_TOLERANCE_MPH * MPH;
+  // Real footprint: player.s is the front bumper, the body runs back from it,
+  // and the box is centred on the car's centreline (player.x), never the eye.
   const pFront = player.s;
   const pRear  = player.s - CFG.PLAYER_LENGTH;
-  const pHalfW = CFG.PLAYER_WIDTH * 0.5;
+  const pHalfW = CFG.PLAYER_SIDE_HALF_WIDTH;
 
   for (const lane of lanes) {
     const lx = laneX(lane.index);
     for (const car of lane.cars) {
       const dx = Math.abs(player.x - lx);
-      const halfW = (pHalfW + car.wid * 0.5) * 0.88;   // a little forgiveness
+      const halfW = pHalfW + car.wid * 0.5 * CFG.NPC_SIDE_SHRINK;
       if (dx > halfW) continue;
 
       const cFront = car.s + car.len / 2;
@@ -2055,18 +2064,25 @@ function cockpitPlaceholder(w, h) {
 }
 
 function layoutUI() {
-  // A hidden or not-yet-laid-out tab reports 0x0. Never build zero-area
-  // canvases from it — drawImage throws on a 0-size source.
-  const w = Math.max(1, window.innerWidth  | 0);
-  const h = Math.max(1, window.innerHeight | 0);
+  // The overlay canvas is the 16:9 view rect exactly, positioned over the GL
+  // canvas. Everything below is therefore rect-relative by construction and
+  // cannot drift against the dashboard art on resize or rotate.
+  const v = computeView();
+  view.x = v.x; view.y = v.y; view.w = v.w; view.h = v.h;
+  const w = v.w, h = v.h;
   const dpr = Math.min(window.devicePixelRatio || 1, CFG.MAX_PIXEL_RATIO);
   ui.w = w; ui.h = h; ui.dpr = dpr;
 
   ui.canvas.width  = Math.max(1, Math.round(w * dpr));
   ui.canvas.height = Math.max(1, Math.round(h * dpr));
+  ui.canvas.style.left = v.x + 'px';
+  ui.canvas.style.top = v.y + 'px';
+  ui.canvas.style.width = w + 'px';
+  ui.canvas.style.height = h + 'px';
   ui.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Cockpit art: anchored bottom-centre, scaled to viewport width.
+  // The cockpit art is 16:9, so it fills the rect with no letterboxing of its
+  // own and every COCKPIT fraction maps straight onto the view.
   const artW = w;
   const artH = artW / COCKPIT.ASPECT;
   ui.rect = { x: 0, y: h - artH, w: artW, h: artH };
@@ -2331,7 +2347,7 @@ function project(x, y, z) {
 }
 
 function drawDebug(ctx) {
-  const camS = player.s - CFG.DRIVER_SETBACK;
+  const camS = player.s - CFG.PLAYER_FRONT_OVERHANG;
   ctx.save();
   ctx.lineWidth = 1;
   ctx.font = '11px ui-monospace, Menlo, monospace';
@@ -2396,14 +2412,54 @@ function drawDebug(ctx) {
     }
   }
 
+  // --- the player's own collision box: front bumper line + side walls ---
+  // This is the calibration aid for PLAYER_FRONT_OVERHANG and the side width.
+  {
+    const hw = CFG.PLAYER_SIDE_HALF_WIDTH;
+    const zFront = -CFG.PLAYER_FRONT_OVERHANG;               // bumper, in camera space
+    const zRear  = zFront + CFG.PLAYER_LENGTH;
+    const fl = project(player.x - hw, 0.03, zFront);
+    const fr = project(player.x + hw, 0.03, zFront);
+    if (!fl.behind && !fr.behind) {
+      ctx.strokeStyle = 'rgba(90,255,140,0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(fl.x, fl.y); ctx.lineTo(fr.x, fr.y); ctx.stroke();
+      ctx.fillStyle = 'rgba(90,255,140,0.95)';
+      ctx.fillText(`front bumper  ${CFG.PLAYER_FRONT_OVERHANG.toFixed(2)}m`, fl.x, fl.y - 4);
+      ctx.lineWidth = 1;
+    }
+    // side walls, drawn back along the body
+    ctx.strokeStyle = 'rgba(90,255,140,0.45)';
+    for (const sx of [-hw, hw]) {
+      const a = project(player.x + sx, 0.03, zFront);
+      const b = project(player.x + sx, 0.03, Math.min(zRear, -0.15));
+      if (a.behind || b.behind) continue;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    // gap to the nearest car ahead in the player's lane
+    const ln = lanes[player.lane0];
+    if (ln) {
+      let g = Infinity;
+      for (const c of ln.cars) {
+        const d = (c.s - c.len / 2) - player.s;
+        if (d >= 0 && d < g) g = d;
+      }
+      if (g < Infinity) {
+        ctx.fillStyle = g < 0.5 ? '#ff6a46' : '#e8e4d8';
+        ctx.fillText(`gap ${g.toFixed(2)}m`, fl.x, fl.y + 14);
+      }
+    }
+  }
+
   // --- legend ---
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(8, 8, 250, 62);
+  ctx.fillRect(8, 8, 268, 92);
   ctx.fillStyle = '#e8e4d8';
-  ctx.fillText('DEBUG (G)  lane centres / NPC boxes', 14, 24);
+  ctx.fillText('DEBUG (G)  lanes / NPC boxes / bumper', 14, 24);
   ctx.fillText(`lane w ${CFG.LANE_WIDTH}m   spacing ${CFG.SPACING_TARGET}m n2n`, 14, 40);
   ctx.fillText(`player lane ${player.lane0}  x ${player.x.toFixed(2)}m`, 14, 56);
-  ctx.fillText(`dead zone ${CFG.ADJACENT_DEAD_ZONE}m`, 14, 68);
+  ctx.fillText(`overhang ${CFG.PLAYER_FRONT_OVERHANG}m  halfW ${CFG.PLAYER_SIDE_HALF_WIDTH}m`, 14, 72);
+  ctx.fillText(`view ${view.w}x${view.h}  seat ${CFG.CAMERA_SEAT_OFFSET_X}m`, 14, 88);
   ctx.restore();
 }
 
@@ -2444,6 +2500,11 @@ const input = {
 
 function pointInRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 
+// Pointer coords are window-space; every hit rect is view-rect-space. The
+// overlay canvas IS the view rect, so subtract its origin.
+function localX(e) { return e.clientX - view.x; }
+function localY(e) { return e.clientY - view.y; }
+
 function bindInput() {
   addEventListener('keydown', e => {
     if (e.repeat) return;
@@ -2471,7 +2532,7 @@ function bindInput() {
   cv.addEventListener('pointerdown', e => {
     if (state !== 'play') return;
     cv.setPointerCapture(e.pointerId);
-    const x = e.clientX, y = e.clientY;
+    const x = localX(e), y = localY(e);
 
     if (pointInRect(x, y, ui.hit.gas))        { input.pointers.set(e.pointerId, 'gas');   input.gas = true; return; }
     if (pointInRect(x, y, ui.hit.brake))      { input.pointers.set(e.pointerId, 'brake'); input.brake = true; return; }
@@ -2491,7 +2552,7 @@ function bindInput() {
     const role = input.pointers.get(e.pointerId);
     if (role !== 'wheel') return;
     const W = ui.hit.wheel;
-    const a = Math.atan2(e.clientY - W.cy, e.clientX - W.cx) * 180 / Math.PI;
+    const a = Math.atan2(localY(e) - W.cy, localX(e) - W.cx) * 180 / Math.PI;
     let d = a - input.wheelGrabAngle;
     while (d > 180) d -= 360;
     while (d < -180) d += 360;
@@ -2794,16 +2855,48 @@ async function doShare() {
 //  RENDER LOOP
 // =============================================================================
 
+/**
+ * The largest 16:9 rect that fits the window, centred. Everything -- the 3D
+ * render, the cockpit art, the HUD, the pedals, the wheel and every touch
+ * target -- lives inside this rect, so their relationship never changes with
+ * window shape. Outside it is black: letterbox or pillarbox.
+ *
+ * The dashboard art happens to be 1672x941 (1.7768), which is 16:9 to within a
+ * tenth of a percent, so the cockpit fills the rect exactly.
+ */
+function computeView() {
+  const W = Math.max(1, window.innerWidth | 0);
+  const H = Math.max(1, window.innerHeight | 0);
+  let w = W, h = Math.round(W / CFG.VIEW_ASPECT);
+  if (h > H) { h = H; w = Math.round(H * CFG.VIEW_ASPECT); }
+  return { x: Math.round((W - w) / 2), y: Math.round((H - h) / 2), w, h };
+}
+
+const view = { x: 0, y: 0, w: 1, h: 1 };
+
 function resizeRenderer() {
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, CFG.MAX_PIXEL_RATIO));
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
+  const v = computeView();
+  view.x = v.x; view.y = v.y; view.w = v.w; view.h = v.h;
+
+  const dpr = Math.min(window.devicePixelRatio || 1, CFG.MAX_PIXEL_RATIO);
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(v.w, v.h, false);
+
+  const gl = renderer.domElement;
+  gl.style.left = v.x + 'px';
+  gl.style.top = v.y + 'px';
+  gl.style.width = v.w + 'px';
+  gl.style.height = v.h + 'px';
+
+  // Fixed aspect and fixed FOV: the view never stretches and never reveals
+  // more or less of the world because the window changed shape.
+  camera.aspect = CFG.VIEW_ASPECT;
+  camera.fov = CFG.FOV;
   camera.updateProjectionMatrix();
 }
 
 function updateScenery() {
-  const camS = player.s - CFG.DRIVER_SETBACK;
+  const camS = player.s - CFG.PLAYER_FRONT_OVERHANG;
   world.roadTex.offset.y = camS / WORLD.ROAD_TILE_M;
   world.wallTex.offset.x = camS / world.wallTileW;
   world.railTex.offset.x = camS / world.railTileW;
@@ -2830,7 +2923,10 @@ function updateCamera(dt) {
     shakeAmt *= Math.pow(0.02, dt);
   }
 
-  camera.position.set(CFG.CAM_X + ox, CFG.CAM_HEIGHT + oy, 0);
+  // The eye rides with the car: player.x is the centreline, the driver sits
+  // CAMERA_SEAT_OFFSET_X to the left of it. Without the player.x term, steering
+  // moves the collision box but never the view.
+  camera.position.set(player.x + CFG.CAMERA_SEAT_OFFSET_X + ox, CFG.CAMERA_HEIGHT + oy, 0);
   const tiltZ = state === 'over' ? 0.055 : 0;
   const basePitch = CFG.CAM_PITCH_DEG;
   camera.rotation.x = lerp(camera.rotation.x, (basePitch + pitch) * Math.PI / 180, 0.18);
@@ -2838,15 +2934,21 @@ function updateCamera(dt) {
 }
 
 let last = performance.now();
+let lastWinW = 0, lastWinH = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
 
   // The tab may have been hidden (0x0) at boot, or rotated without firing
-  // resize. Re-layout whenever the viewport actually changes.
+  // resize. Re-layout whenever the WINDOW actually changes — compare against
+  // the window size, not ui.w/ui.h, which are the 16:9 view rect and rarely
+  // equal the window.
   const vw = Math.max(1, window.innerWidth | 0), vh = Math.max(1, window.innerHeight | 0);
-  if (vw !== ui.w || vh !== ui.h) { layoutUI(); resizeRenderer(); }
+  if (vw !== lastWinW || vh !== lastWinH) {
+    lastWinW = vw; lastWinH = vh;
+    layoutUI(); resizeRenderer();
+  }
 
   if (state === 'play' && !paused) {
     stats.time += dt;
