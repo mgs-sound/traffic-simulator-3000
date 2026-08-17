@@ -10,7 +10,7 @@
 // =============================================================================
 
 import * as THREE from 'three';
-import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, SHARE, LANE, UNLOCKS, GPS, EMOTE, MPH, FT } from './config.js';
+import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, SHARE, LANE, UNLOCKS, GPS, EMOTE, OVERHEAT, MPH, FT } from './config.js';
 
 // ---------------------------------------------------------------- utilities --
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -1351,7 +1351,11 @@ function updatePlayer(dt) {
   // --- longitudinal ----------------------------------------------------------
   const prev = player.speed;
   let a = 0;
-  if (player.brake > 0.01) {
+  if (heat.blown) {
+    // dead engine: no gas, no creep — just rolling resistance (updateHeat
+    // handles the coast-down)
+    a = player.brake > 0.01 ? -CFG.BRAKE_FORCE * player.brake : 0;
+  } else if (player.brake > 0.01) {
     a = -CFG.BRAKE_FORCE * player.brake;
   } else if (player.gas > 0.01) {
     a = CFG.ACCEL * player.gas;
@@ -1360,7 +1364,8 @@ function updatePlayer(dt) {
     if (player.speed < CFG.CREEP_SPEED) a = CFG.ACCEL * 0.30;
     else a = -CFG.COAST_DRAG;
   }
-  player.speed = clamp(player.speed + a * dt, 0, CFG.MAX_SPEED);
+  // stage-2 overheating caps the achievable top speed (decays toward limp)
+  player.speed = clamp(player.speed + a * dt, 0, Math.min(CFG.MAX_SPEED, heat.cap));
   player.s += player.speed * dt;
   player.accelFelt = lerp(player.accelFelt, (player.speed - prev) / Math.max(dt, 1e-4), 0.18);
 
@@ -2068,7 +2073,7 @@ const Audio = {
 
   // ---------------------------------------------------- game-over sequence --
   // crash -> silence -> one lone sad horn a long way off -> stats
-  crashSequence() {
+  crashSequence(skipImpact) {
     if (!this.ready) return;
     this._crashing = true;
     const t = this.ctx.currentTime;
@@ -2087,7 +2092,7 @@ const Audio = {
     this.rumbleGain.gain.setTargetAtTime(0, t, 0.5);
     this.ambientBus.gain.setTargetAtTime(0, t + 0.9, 0.35);
 
-    this.crash();
+    if (!skipImpact) this.crash();   // blown engines already banged at stage 3
 
     // one lone, distant, defeated horn
     setTimeout(() => {
@@ -2836,8 +2841,10 @@ function drawOverlay() {
   ctx.clearRect(0, 0, ui.w, ui.h);
 
   // The dashboard's mirror glass is transparent, so paint the reflection first
-  // and let the housing frame it.
+  // and let the housing frame it. Smoke rises off the hood, so it also goes
+  // UNDER the cockpit art and shows through the windshield cut-out.
   drawMirror(ctx);
+  drawSmoke(ctx);
 
   if (ui.rect.y > 0) {
     ctx.fillStyle = COCKPIT.HEADLINER;
@@ -2849,6 +2856,7 @@ function drawOverlay() {
   drawStereo(ctx);
   drawGPS(ctx);
   drawBlinker(ctx);
+  drawTempNeedle(ctx);
 
   const W = ui.hit.wheel;
   drawWheel(ctx, W.cx, W.cy, ui.wheelArtR || W.r, player.wheel);
@@ -3005,6 +3013,7 @@ function startGame() {
   over.hidden = true;
   resetPlayer();
   resetUnlocks();
+  resetHeat();
   fadeOutScrapeDecals();          // last run's wall damage fades away
   emote.t = -1; emote.cooldownUntil = 0;
   Audio.rateMult = 1;
@@ -3023,14 +3032,16 @@ function startGame() {
   state = 'play';
 }
 
-function gameOver(relSpeed, car) {
+function gameOver(relSpeed, car, cause) {
   if (state !== 'play') return;
   state = 'over';
   stats.impact = relSpeed;
+  document.querySelector('#over .crashed').textContent =
+    cause === 'blown' ? 'YOUR ENGINE BLEW' : 'YOU CRASHED';
   input.gas = input.brake = false;
   // crash -> the world falls silent -> one lone distant horn -> the form
   Audio.stopAmbient();
-  Audio.crashSequence();
+  Audio.crashSequence(cause === 'blown');
   shake(1.6);
 
   const feet = Math.max(0, (player.s - stats.startS) * FT);
@@ -3053,6 +3064,149 @@ function gameOver(relSpeed, car) {
     void over.offsetWidth;          // force a reflow so the transition runs.
     over.classList.add('show');     // (rAF would be throttled in a hidden tab)
   }, AUDIO.GAMEOVER_FADE_START_S * 1000);
+}
+
+// =============================================================================
+//  OVERHEAT — speed has a price
+// =============================================================================
+
+const heat = {
+  value: 0,        // seconds of accumulated abuse (drains slower than it builds)
+  stage: 0,        // 0 fine / 1 smoking / 2 overheating / 3 blown
+  cap: Infinity,   // stage-2 decaying top speed
+  blown: false,
+  hissAt: 0,
+  smoke: [],       // hood-seam particles
+  smokeCarry: 0,
+};
+
+function resetHeat() {
+  heat.value = 0; heat.stage = 0; heat.cap = Infinity;
+  heat.blown = false; heat.hissAt = 0;
+  heat.smoke.length = 0; heat.smokeCarry = 0;
+}
+
+function updateHeat(dt) {
+  const T1 = OVERHEAT.OVERHEAT_TIME, T2 = T1 * 2, T3 = T1 * 3;
+
+  if (!heat.blown) {
+    if (player.speed > OVERHEAT.SPEED_THRESHOLD) {
+      heat.value += dt;
+    } else {
+      // cooling: one stage's worth of heat sheds in COOLDOWN_TIME
+      heat.value = Math.max(0, heat.value - dt * (T1 / OVERHEAT.COOLDOWN_TIME));
+    }
+
+    const prev = heat.stage;
+    heat.stage = heat.value >= T3 ? 3 : heat.value >= T2 ? 2 : heat.value >= T1 ? 1 : 0;
+
+    if (heat.stage === 2) {
+      // power loss: achievable top speed decays toward limp speed
+      if (heat.cap === Infinity) heat.cap = Math.max(player.speed, OVERHEAT.LIMP_SPEED);
+      heat.cap = Math.max(OVERHEAT.LIMP_SPEED, heat.cap - OVERHEAT.LIMP_DECAY * dt);
+      // TODO(audio): faint steam hiss loop — reusing the quiet tyre-screech
+      // placeholder at low intensity every second or so.
+      if (stats.time >= heat.hissAt) {
+        heat.hissAt = stats.time + 1.3;
+        Audio.screech({ pan: 0, dist: 26, intensity: 0.35 });
+      }
+    } else if (heat.stage < 2) {
+      heat.cap = Infinity;   // recovered — full power back
+    }
+
+    if (heat.stage === 3 && prev < 3 && OVERHEAT.OVERHEAT_CAN_KILL) {
+      heat.blown = true;
+      // TODO(audio): real engine-detonation bang — reusing the crash layer.
+      Audio.crash();
+      shake(1.2);
+    }
+  } else {
+    // blown: dead engine, coasting to a stop in traffic
+    player.gas = 0;
+    player.speed = Math.max(0, player.speed - OVERHEAT.BLOWN_DRAG * dt);
+    if (player.speed <= 0.05 && state === 'play') {
+      gameOver(CFG.BUMP_TOLERANCE_MPH * MPH * 1.01, null, 'blown');
+    }
+  }
+
+  // --- hood-seam smoke -----------------------------------------------------
+  const rate = heat.blown ? OVERHEAT.SMOKE_RATE_S3
+             : heat.stage === 2 ? OVERHEAT.SMOKE_RATE_S2
+             : heat.stage === 1 ? OVERHEAT.SMOKE_RATE_S1 : 0;
+  if (rate > 0 && ui.rect) {
+    heat.smokeCarry += rate * dt;
+    while (heat.smokeCarry >= 1) {
+      heat.smokeCarry -= 1;
+      const R = ui.rect;
+      heat.smoke.push({
+        x: R.x + (OVERHEAT.SMOKE_X0 + Math.random() * (OVERHEAT.SMOKE_X1 - OVERHEAT.SMOKE_X0)) * R.w,
+        y: R.y + OVERHEAT.SMOKE_Y * R.h,
+        vx: rand(-6, 6),
+        vy: -rand(18, 34) * (heat.blown ? 1.6 : 1),
+        r: rand(4, 9) * (ui.h / 500),
+        life: 0,
+        maxLife: rand(1.4, 2.4),
+      });
+    }
+  }
+  for (let i = heat.smoke.length - 1; i >= 0; i--) {
+    const p = heat.smoke[i];
+    p.life += dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx += rand(-14, 14) * dt;           // lazy drift
+    p.r += 9 * dt * (ui.h / 500);
+    if (p.life >= p.maxLife) heat.smoke.splice(i, 1);
+  }
+}
+
+// Drawn UNDER the cockpit art: the smoke comes off the hood and is seen
+// through the (transparent) windshield region of the overlay.
+function drawSmoke(ctx) {
+  if (!heat.smoke.length) return;
+  ctx.save();
+  for (const p of heat.smoke) {
+    const k = p.life / p.maxLife;
+    const fade = k < 0.15 ? k / 0.15 : 1 - (k - 0.15) / 0.85;
+    let col;
+    if (heat.blown)            col = `rgba(28,28,30,${(0.55 * fade).toFixed(3)})`;
+    else if (heat.stage === 2) col = `rgba(88,88,92,${(0.40 * fade).toFixed(3)})`;
+    else                       col = `rgba(165,165,168,${(0.26 * fade).toFixed(3)})`;
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+    g.addColorStop(0, col);
+    g.addColorStop(1, 'rgba(120,120,120,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Temp needle over the small right-hand cluster gauge. C at rest, H pinned.
+function drawTempNeedle(ctx) {
+  const R = ui.rect, G = OVERHEAT.GAUGE;
+  const cx = R.x + G.cx * R.w, cy = R.y + G.cy * R.h;
+  const r = Math.max(G.r * R.w, 7);
+  const t = clamp(heat.value / (OVERHEAT.OVERHEAT_TIME * 2), 0, 1);  // full sweep at stage 2
+  const ang = (OVERHEAT.NEEDLE_C_DEG + (OVERHEAT.NEEDLE_H_DEG - OVERHEAT.NEEDLE_C_DEG) * t)
+              * Math.PI / 180;
+
+  ctx.save();
+  // red zone tick at the H end so the needle reads at a glance
+  const hAng = OVERHEAT.NEEDLE_H_DEG * Math.PI / 180;
+  ctx.strokeStyle = 'rgba(220,60,40,0.85)';
+  ctx.lineWidth = Math.max(2, r * 0.22);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.98, hAng - 0.5, hAng + 0.10);
+  ctx.stroke();
+
+  ctx.strokeStyle = heat.stage >= 2 ? '#ff4a2e' : '#ff8c4a';
+  ctx.lineWidth = Math.max(2, r * 0.16);
+  ctx.lineCap = 'round';
+  if (heat.stage >= 1) { ctx.shadowColor = 'rgba(255,90,40,0.8)'; ctx.shadowBlur = r * 0.6; }
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(ang) * r * 0.22, cy - Math.sin(ang) * r * 0.22);
+  ctx.lineTo(cx + Math.cos(ang) * r * 0.95, cy + Math.sin(ang) * r * 0.95);
+  ctx.stroke();
+  ctx.restore();
 }
 
 // =============================================================================
@@ -3782,8 +3936,9 @@ async function boot() {
       updateHonking(dt);
       updateUnlocks(dt);
       updateEmote(dt);
+      updateHeat(dt);
     },
-    gps, unlocks, emote, triggerEmote,
+    gps, unlocks, emote, triggerEmote, heat,
   };
 
   requestAnimationFrame(frame);

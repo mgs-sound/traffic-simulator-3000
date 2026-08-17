@@ -14,7 +14,10 @@ export const CFG = {
 
   // ---------------------------------------------------------------- player --
   CREEP_SPEED:  0.5 * MPH,  // automatic-transmission idle roll. Forces micro-braking.
-  MAX_SPEED:   15.0 * MPH,  // absolute ceiling, only reachable mid-surge
+  MAX_SPEED:   65.0 * MPH,  // the car CAN do freeway speed — acceleration stays
+                            // sluggish commuter-car, so reaching it takes
+                            // sustained open road, which barely exists. And the
+                            // radiator has opinions (see OVERHEAT below).
   ACCEL:            1.9,    // m/s² — deliberately sluggish
   BRAKE_FORCE:      7.6,    // m/s² — brakes are strong, that is the whole tension
   COAST_DRAG:       1.15,   // m/s² decel when off both pedals and above creep
@@ -420,6 +423,44 @@ export const LANE = {
   DECAL_GROW_S:   0.5,       // m of extra streak per second while pinned still
   DECAL_TINT_LEFT: 0x8f8f8f, // darker on the guardrail so it reads on metal
   DECAL_MAX: 6,              // keep this many episodes before recycling
+};
+
+// =============================================================================
+//  OVERHEAT
+//  A hidden heat meter builds whenever speed is above the threshold and drains
+//  below it. Three stages, each OVERHEAT_TIME seconds of continuous abuse
+//  apart: smoking -> overheating (power loss) -> blown (game over). Flooring
+//  it through every surge wave now has a cost.
+// =============================================================================
+
+export const OVERHEAT = {
+  SPEED_THRESHOLD: 15 * MPH, // heat builds above this, drains below
+  OVERHEAT_TIME: 10,         // s of continuous heat per stage:
+                             //   10 s -> stage 1 (smoking)
+                             //   20 s -> stage 2 (overheating, power loss)
+                             //   30 s -> stage 3 (blown) if CAN_KILL
+  COOLDOWN_TIME: 15,         // s under the threshold to shed one stage's heat
+  OVERHEAT_CAN_KILL: true,   // stage 3 ends the run
+
+  // stage 2: the engine loses power — achievable top speed decays toward this
+  LIMP_SPEED: 20 * MPH,
+  LIMP_DECAY: 2.0,           // m/s of top-speed lost per second in stage 2
+
+  // stage 3: total power loss; the car coasts to a dead stop on this drag
+  BLOWN_DRAG: 1.6,           // m/s²
+
+  // temp needle over the small right-hand gauge in the cluster art.
+  // Fractions of the cockpit art; angles in degrees, standard screen frame.
+  GAUGE: { cx: 0.4065, cy: 0.664, r: 0.0165 },
+  NEEDLE_C_DEG: 210,         // cold rest position (pointing lower-left)
+  NEEDLE_H_DEG: 330,         // pinned in the red (pointing lower-right)
+
+  // hood-seam smoke (code-generated particles, no assets)
+  SMOKE_Y: 0.505,            // emitter line, fraction of cockpit art height
+  SMOKE_X0: 0.28, SMOKE_X1: 0.72,
+  SMOKE_RATE_S1: 7,          // particles/second per stage
+  SMOKE_RATE_S2: 16,
+  SMOKE_RATE_S3: 34,
 };
 
 // =============================================================================
