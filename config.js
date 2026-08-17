@@ -439,9 +439,11 @@ export const UNLOCKS = [
 ];
 
 export const GPS = {
-  // Position on the dash, fractions of the cockpit art: mounted right of the
-  // instrument cluster, above the centre stack.
-  rect: { x: 0.545, y: 0.545, w: 0.135, h: 0.155 },
+  // Position, fractions of the cockpit art: perched ON TOP of the dashboard,
+  // right of the instrument cluster — suction mount on the dash top surface
+  // (~0.52 is the dash lip), screen up into the windshield area like a real
+  // aftermarket unit.
+  rect: { x: 0.545, y: 0.385, w: 0.135, h: 0.155 },
   DROP_S: 0.55,              // drop-in animation duration at unlock
 
   DEST_MI_START: 14.2,
