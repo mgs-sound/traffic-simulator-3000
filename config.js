@@ -152,6 +152,8 @@ export const ASSETS = {
   wall:     'assets/Freeway_Wall.png',     // 3 stacked strips: backdrop / wall / guardrail
   sign:     'assets/Exit_Sign.png',        // complete gantry incl. posts
   title:    'assets/Title.png',            // start-screen logo
+  gps:      'assets/GPS.png',              // 2 cells: off / on-with-magenta-key screen
+  hand:     'assets/ThumbsUp.png',         // 3 frames: rise / hold / present
   music:    'assets/buttrock.mp3',         // the cassette that is stuck in there
 };
 
@@ -370,6 +372,104 @@ export const AUDIO = {
   CRASH_DUCK: 0.15,
   GAMEOVER_FADE_START_S: 1.80,
   GAMEOVER_SAD_HONK_S:   2.60,
+};
+
+// =============================================================================
+//  JEFF PASS — lane changing
+//  Lane changes are VERY hard on purpose: gaps in the other lanes are tuned
+//  slightly smaller than the car needs, and anyone who sees your blinker
+//  closes theirs. Real changes need a surge wave — exactly when it is most
+//  dangerous.
+// =============================================================================
+
+export const LANE = {
+  // Holding steering toward a lane for longer than this auto-starts the
+  // blinker on that side.
+  SIGNAL_HOLD_S: 1.0,
+  BLINK_PERIOD_S: 0.8,       // dash indicator flash period
+
+  // Committing = crossing the lane line by >40% of car width. Measured from
+  // the car's centreline: line + 0.4*width - width/2 = line - 0.1*width.
+  COMMIT_FRACTION: 0.40,
+
+  // --- adjacent-lane gap tuning (nose-to-nose multiples of car length) ---
+  GAP_TIGHT_MULT: 1.1,       // typical adjacent gap: just too small
+  GAP_FAIR_MULT:  1.6,       // the occasional real chance
+  GAP_FAIR_CHANCE: 0.22,     // how often a fair gap appears
+
+  // --- the joke: blinker seen -> gap closes ---
+  CLOSE_SEE_RANGE: 26,       // m — how far back a driver notices your blinker
+  CLOSE_DURATION_MIN: 1.0,   // s to shrink the gap
+  CLOSE_DURATION_MAX: 2.0,
+  CLOSE_SPEED_BOOST: 2.6,    // m/s of extra closing speed while shutting you out
+  CLOSE_TARGET_MULT: 0.55,   // the gap they leave you, in car lengths. Rude.
+
+  // --- walls (gameplay faces, inside the visual barrier art) ---
+  WALL_RIGHT_X:  9.9,        // sound wall inner face
+  WALL_LEFT_X:  -9.2,        // guardrail inner face
+  WALL_CRASH_MPH: 2.0,       // lateral closing speed above this = crash
+  SCRAPE_MAX_S:   3.0,       // continuous scraping longer than this = game over
+  SCRAPE_DRAG:    2.2,       // m/s² speed scrub while scraping
+  SCRAPE_SHAKE:   0.35,      // continuous screen rumble amplitude
+};
+
+// =============================================================================
+//  JEFF PASS — distance unlocks
+//  Generic framework keyed to feet travelled this run. Each milestone fires
+//  once per run: banner, chime (existing placeholder tone), feature flag.
+//  Adding a milestone later must be pure config: append an entry here.
+// =============================================================================
+
+export const UNLOCKS = [
+  { ft: 5280, id: 'gps', label: 'GPS NAVIGATION' },
+  // TODO(art/design): milestone at 2 miles — e.g. cup holder / coffee.
+  // { ft: 10560, id: 'tbd2mi', label: 'TBD' },
+  // TODO(art/design): milestone at 5 miles — e.g. cruise control that only
+  // works below 4 mph.
+  // { ft: 26400, id: 'tbd5mi', label: 'TBD' },
+];
+
+export const GPS = {
+  // Position on the dash, fractions of the cockpit art: mounted right of the
+  // instrument cluster, above the centre stack.
+  rect: { x: 0.545, y: 0.545, w: 0.135, h: 0.155 },
+  DROP_S: 0.55,              // drop-in animation duration at unlock
+
+  DEST_MI_START: 14.2,
+  // Distance ticks down insultingly slowly and never reaches zero: only a
+  // tenth of real progress registers, and it floors at 11.9 mi.
+  DEST_PROGRESS_RATIO: 0.1,
+  DEST_MI_FLOOR: 11.9,
+
+  ETA_START_MIN: 28,
+  RECALC_MIN_S: 20,          // every 20-45 s...
+  RECALC_MAX_S: 45,
+  ETA_BUMP_MIN: 1,           // ...the ETA goes UP by 1-8 minutes. Never down.
+  ETA_BUMP_MAX: 8,           // averages ~8.3 min of ETA per real minute, so a
+                             // 15-minute commute reads comfortably past 2 hours
+  RECALC_FLASH_S: 1.4,       // "RECALCULATING..." flash
+};
+
+// =============================================================================
+//  JEFF PASS — thumbs-up emote
+//  Funny AND raises crash risk: that is the trade.
+// =============================================================================
+
+export const EMOTE = {
+  COOLDOWN_S: 10,
+  RISE_S: 0.25, HOLD_S: 1.5, AWAY_S: 0.30,   // 3-phase: rise / hold / present-away
+
+  RAGE_RADIUS: 15,           // m — everyone this close honks at you
+  RAGE_VOLUME_BOOST: 1.5,    // +50% (existing honk voices, just louder/denser)
+  TAILGATE_COUNT: 2,         // the two nearest cars...
+  TAILGATE_FACTOR: 0.7,      // ...close to 30% tighter spacing...
+  TAILGATE_S: 20,            // ...for this long...
+  TAILGATE_BRAKE_MULT: 1.5,  // ...with harsher brake-slam reactions
+  AMBIENT_RATE_MULT: 2,      // ambient honk frequency doubles...
+  AMBIENT_RATE_S: 30,        // ...for this long
+
+  // Touch button, left side above the wheel (fractions of the view rect).
+  btn: { x: 0.030, y: 0.560, w: 0.075, h: 0.135 },
 };
 
 // =============================================================================

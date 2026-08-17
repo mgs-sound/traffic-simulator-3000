@@ -10,7 +10,7 @@
 // =============================================================================
 
 import * as THREE from 'three';
-import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, SHARE, MPH, FT } from './config.js';
+import { CFG, AUDIO, ASSETS, ATLAS, SEGMENT, STICKER, SEMI, FRONTS, COCKPIT, TOUCH, WORLD, SHARE, LANE, UNLOCKS, GPS, EMOTE, MPH, FT } from './config.js';
 
 // ---------------------------------------------------------------- utilities --
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -1018,6 +1018,12 @@ function spawnCar(laneIndex, s, forceSemi = false) {
     honkCooldown: rand(0, 2),
     len: isSemi ? SEMI.length : variant.length,
     wid: isSemi ? SEMI.width  : variant.width,
+    // JEFF PASS: adjacent-lane gap character. Mostly just-too-small, with the
+    // occasional real chance (LANE.GAP_FAIR_CHANCE).
+    gapMult: Math.random() < LANE.GAP_FAIR_CHANCE ? LANE.GAP_FAIR_MULT : LANE.GAP_TIGHT_MULT,
+    tailgateUntil: 0,  // emote fallout: tighter following for a while
+    brakeMult: 1,      // emote fallout: harsher brake slams
+    denyUntil: 0,      // saw your blinker; currently shutting the gap
   };
 }
 
@@ -1142,16 +1148,31 @@ function updateLane(lane, dt) {
       // Spacing is authored nose-to-nose; convert to the clear gap this
       // particular pair needs, so a 16 m semi does not sit 7 m from a hatchback.
       const half = (lead.len + car.len) / 2;
-      const wantClear = Math.max(CFG.SPACING_TARGET - half, CFG.CLEAR_MIN);
-      const minClear  = Math.max(CFG.SPACING_MIN    - half, CFG.CLEAR_PANIC);
+      let wantClear;
+      if (lane.index === player.lane0) {
+        wantClear = Math.max(CFG.SPACING_TARGET - half, CFG.CLEAR_MIN);
+      } else {
+        // Adjacent lanes run tighter: mostly ~1.1 player-lengths of clear air —
+        // just under what a lane change needs — with the occasional 1.6.
+        wantClear = Math.max(car.gapMult * CFG.PLAYER_LENGTH, CFG.CLEAR_MIN);
+      }
+      // Emote fallout / blinker denial: temporarily even tighter.
+      if (car.tailgateUntil > stats.time) wantClear *= EMOTE.TAILGATE_FACTOR;
+      if (car.denyUntil     > stats.time) wantClear = Math.min(wantClear, LANE.CLOSE_TARGET_MULT * CFG.PLAYER_LENGTH);
+
+      const minClear = Math.max(CFG.SPACING_MIN - half, CFG.CLEAR_PANIC);
       target = clamp(lead.speed + (gap - wantClear) * CFG.K_GAP, 0, CFG.SURGE_SPEED * 1.05);
-      if (gap < minClear) target = 0;
+      if (gap < minClear && car.denyUntil <= stats.time) target = 0;
+      // Actively shutting the door: close faster than gap-following would.
+      if (car.denyUntil > stats.time && gap > LANE.CLOSE_TARGET_MULT * CFG.PLAYER_LENGTH) {
+        target = Math.max(target, lead.speed + LANE.CLOSE_SPEED_BOOST);
+      }
     }
 
     const dv = target - car.speed;
     let a;
     if (dv > 0) a = Math.min(dv / 0.55, CFG.NPC_ACCEL);
-    else        a = Math.max(dv / 0.20, -CFG.NPC_BRAKE_HARSHNESS);
+    else        a = Math.max(dv / 0.20, -CFG.NPC_BRAKE_HARSHNESS * car.brakeMult);
 
     car.accel = a;
     car.speed = Math.max(0, car.speed + a * dt);
@@ -1286,14 +1307,23 @@ const player = {
   s: 0, x: 0, speed: 0, lateral: 0,
   wheel: 0,            // degrees, -MAX..MAX
   gas: 0, brake: 0,    // 0..1 ramped pedal force
-  lane0: 1,
+  lane0: 1,            // committed lane (stateful — see lane-commit hysteresis)
   accelFelt: 0,
+  // JEFF PASS
+  signalDir: 0,        // -1 left, 0 off, 1 right
+  signalHold: 0,       // s the wheel has been held toward a side
+  blinkT: 0,
+  scrapeT: 0,          // continuous seconds against a wall
+  scraping: false,
 };
 
 function resetPlayer() {
   player.s = 0; player.x = 0; player.speed = 0; player.lateral = 0;
   player.wheel = 0; player.gas = 0; player.brake = 0; player.accelFelt = 0;
   player.lane0 = 1;
+  player.signalDir = 0; player.signalHold = 0; player.blinkT = 0;
+  player.heldSide = 0;
+  player.scrapeT = 0; player.scraping = false;
 }
 
 function updatePlayer(dt) {
@@ -1332,23 +1362,94 @@ function updatePlayer(dt) {
   player.accelFelt = lerp(player.accelFelt, (player.speed - prev) / Math.max(dt, 1e-4), 0.18);
 
   // --- lateral: heavily speed-limited (GDD §4) ------------------------------
+  // At a dead stop the wheel turns but the car just crabs — real lane changes
+  // need a surge wave, which is exactly when they are most dangerous.
   const authority = clamp(player.speed / CFG.STEER_SPEED_FALLOFF, 0, 1);
   player.lateral = (player.wheel / CFG.WHEEL_MAX_DEG) * CFG.STEER_RATE * authority;
   player.x += player.lateral * dt;
 
-  const limit = CFG.LANE_WIDTH * 1.5 - CFG.PLAYER_WIDTH * 0.5 + 0.35;
-  if (player.x < -limit || player.x > limit) {
-    player.x = clamp(player.x, -limit, limit);
-    if (Math.abs(player.lateral) > 0.25 && stats.time - stats.lastScrape > 0.8) {
-      stats.lastScrape = stats.time;
-      Audio.scrape();
-      shake(0.25);
+  // --- turn signal: hold the wheel toward a side for >1s -------------------
+  const steerSide = player.wheel > 18 ? 1 : player.wheel < -18 ? -1 : 0;
+  if (steerSide === 0) {
+    player.signalHold = 0;
+    player.signalDir = 0;
+  } else if (steerSide === player.heldSide) {
+    player.signalHold += dt;
+    if (player.signalHold >= LANE.SIGNAL_HOLD_S && player.signalDir !== steerSide) {
+      player.signalDir = steerSide;   // blinker auto-starts
+      player.blinkT = 0;
     }
-    player.lateral = 0;
+  } else {
+    player.heldSide = steerSide;
+    player.signalHold = 0;
+    player.signalDir = 0;
+  }
+  if (player.signalDir !== 0) {
+    const prevBlink = player.blinkT;
+    player.blinkT += dt;
+    // tick on each phase edge. TODO(audio): real turn-signal relay tick —
+    // reusing the distant 'beep' horn voice as the placeholder tone.
+    if (Math.floor(prevBlink / (LANE.BLINK_PERIOD_S / 2)) !==
+        Math.floor(player.blinkT / (LANE.BLINK_PERIOD_S / 2))) {
+      Audio.honk({ kind: 'beep', dist: 85, pan: player.signalDir * 0.4, bus: Audio.sfxBus });
+    }
   }
 
-  player.lane0 = Math.round(player.x / CFG.LANE_WIDTH) + 1;
-  player.lane0 = clamp(player.lane0, 0, CFG.LANE_COUNT - 1);
+  // --- walls: right sound wall / left guardrail ----------------------------
+  const halfW = CFG.PLAYER_SIDE_HALF_WIDTH;
+  let touchingWall = false;
+  for (const [wallX, side] of [[LANE.WALL_RIGHT_X, 1], [LANE.WALL_LEFT_X, -1]]) {
+    const edge = player.x + side * halfW;
+    const past = side === 1 ? edge - wallX : wallX - edge;
+    if (past < 0) continue;
+
+    const closing = player.lateral * side;   // lateral speed INTO the wall
+    if (closing > LANE.WALL_CRASH_MPH * MPH) {
+      gameOver(Math.max(closing, CFG.BUMP_TOLERANCE_MPH * MPH * 1.01), null);
+      return;
+    }
+    // survivable scrape: pinned to the wall, speed scrubbing off, rumbling
+    touchingWall = true;
+    player.x = wallX - side * halfW;
+    player.lateral = 0;
+    player.speed = Math.max(0, player.speed - LANE.SCRAPE_DRAG * dt);
+    shake(LANE.SCRAPE_SHAKE);
+    if (stats.time - stats.lastScrape > 0.45) {
+      stats.lastScrape = stats.time;
+      // TODO(audio): looping metal-on-concrete scrape — reusing the one-shot
+      // scrape placeholder for now.
+      Audio.scrape();
+    }
+  }
+  if (touchingWall) {
+    player.scrapeT += dt;
+    player.scraping = true;
+    if (player.scrapeT >= LANE.SCRAPE_MAX_S) {
+      gameOver(CFG.BUMP_TOLERANCE_MPH * MPH * 1.5, null);   // ground away the door
+      return;
+    }
+  } else {
+    player.scrapeT = 0;
+    player.scraping = false;
+  }
+
+  // --- lane commit: crossed the line by >40% of car width ------------------
+  // Wide, explicit hysteresis: you stay in your committed lane until your
+  // centreline is COMMIT_FRACTION * width past its boundary line.
+  {
+    const commit = LANE.COMMIT_FRACTION * CFG.PLAYER_WIDTH;
+    const cur = player.lane0;
+    const curCentre = laneX(cur);
+    const lineR = curCentre + CFG.LANE_WIDTH / 2;
+    const lineL = curCentre - CFG.LANE_WIDTH / 2;
+    if (cur < CFG.LANE_COUNT - 1 && player.x > lineR + commit) {
+      player.lane0 = cur + 1;
+      player.signalDir = 0; player.signalHold = 0;   // change made; blinker off
+    } else if (cur > 0 && player.x < lineL - commit) {
+      player.lane0 = cur - 1;
+      player.signalDir = 0; player.signalHold = 0;
+    }
+  }
 
   stats.topSpeed = Math.max(stats.topSpeed, player.speed);
 }
@@ -1378,15 +1479,22 @@ function checkCollisions() {
       const cRear  = car.s - car.len / 2;
       if (pFront < cRear || pRear > cFront) continue;  // no longitudinal overlap
 
-      // relative speed: longitudinal closing + lateral drift
       const dvLong = player.speed - car.speed;
-      const rel = Math.hypot(dvLong, player.lateral);
+      const penLong = Math.min(pFront - cRear, cFront - pRear);
+      const penLat  = halfW - dx;
+
+      // Severity depends on the KIND of contact. A side-swipe between two cars
+      // rolling in the same direction is judged on lateral closing speed —
+      // otherwise brushing doors while 2 mph faster than your neighbour would
+      // read as a frontal crash.
+      const sideContact = penLat < penLong;
+      const rel = sideContact
+        ? Math.abs(player.lateral) + Math.abs(dvLong) * 0.25
+        : Math.hypot(dvLong, player.lateral);
 
       if (rel > tol) { gameOver(rel, car); return; }
 
       // ---- love tap ------------------------------------------------------
-      const penLong = Math.min(pFront - cRear, cFront - pRear);
-      const penLat  = halfW - dx;
       if (penLat < penLong) {
         player.x += (player.x < lx ? -1 : 1) * (penLat + 0.01);
         player.lateral = 0;
@@ -1414,6 +1522,33 @@ function checkCollisions() {
         stats.honks++;
         shake(0.55);
       }
+    }
+  }
+}
+
+// THE JOKE (JEFF PASS): drivers who can see your blinker close the gap.
+// The car behind your target gap accelerates until the space you wanted is
+// LANE.CLOSE_TARGET_MULT car-lengths — i.e. gone.
+function updateBlinkerDenial() {
+  if (player.signalDir === 0) return;
+  const target = player.lane0 + player.signalDir;
+  if (target < 0 || target >= CFG.LANE_COUNT) return;
+  const lane = lanes[target];
+
+  // the gap beside the player: lead = first car ahead, closer = first behind
+  let closer = null, bestBehind = Infinity;
+  for (const c of lane.cars) {
+    const behind = player.s - c.s;
+    if (behind > 0 && behind < bestBehind && behind < LANE.CLOSE_SEE_RANGE) {
+      bestBehind = behind; closer = c;
+    }
+  }
+  if (closer) {
+    if (closer.denyUntil <= stats.time) {
+      // just noticed the blinker: commit to shutting the door for 1-2 s
+      closer.denyUntil = stats.time + rand(LANE.CLOSE_DURATION_MIN, LANE.CLOSE_DURATION_MAX) + 4;
+    } else {
+      closer.denyUntil = Math.max(closer.denyUntil, stats.time + 1.5);
     }
   }
 }
@@ -1682,8 +1817,12 @@ const Audio = {
     }
   },
 
+  // rateMult is a GAMEPLAY dial (the emote doubles ambient honk frequency for
+  // a while) — same voices, same levels, just scheduled more often.
+  rateMult: 1,
+
   _scheduleHonks() {
-    const next = rand(AUDIO.HONK_MIN_S, AUDIO.HONK_MAX_S);
+    const next = rand(AUDIO.HONK_MIN_S, AUDIO.HONK_MAX_S) / (this.rateMult || 1);
     this.honkTimer = setTimeout(() => {
       if (!this._crashing) this.randomHonk();
       this._scheduleHonks();
@@ -2122,6 +2261,14 @@ function layoutUI() {
   ui.hit.gas   = { x: w - m - gasW, y: h - m - ph, w: gasW, h: ph };
   ui.hit.brake = { x: w - m - gasW - gap - brakeW, y: h - m - ph, w: brakeW, h: ph };
 
+  // emote button: left side, above the wheel (view-rect fractions, min 64px)
+  {
+    const b = EMOTE.btn;
+    const bw = Math.max(b.w * w, TOUCH.MIN_TARGET_PX);
+    const bh = Math.max(b.h * h, TOUCH.MIN_TARGET_PX);
+    ui.hit.emote = { x: b.x * w, y: b.y * h, w: bw, h: bh };
+  }
+
   const wr = Math.max(short * TOUCH.WHEEL_R, TOUCH.MIN_TARGET_PX);
   ui.hit.wheel = { cx: R.x + COCKPIT.wheel.cx * R.w, cy: R.y + COCKPIT.wheel.cy * R.h, r: wr };
   ui.hit.wheel.cx = clamp(ui.hit.wheel.cx, wr * 0.8, w * 0.5);
@@ -2463,6 +2610,206 @@ function drawDebug(ctx) {
   ctx.restore();
 }
 
+// ---------------------------------------------------------------- JEFF PASS --
+
+// GPS unit: absent from the dash until the mile-one unlock, then drops in.
+function drawGPS(ctx) {
+  if (!gps.active) return;
+  const R = ui.rect, G = GPS.rect;
+  const w = G.w * R.w, h = G.h * R.h;
+  const x = R.x + G.x * R.w;
+  const drop = 1 - (gps.dropT / GPS.DROP_S);
+  const y = R.y + G.y * R.h - drop * drop * h * 1.4;   // ease-out drop-in
+
+  ctx.save();
+
+  if (ART.gpsCanvas && ART.gpsOn) {
+    // real art: ON cell, magenta screen replaced by our live map
+    const cell = ART.gpsOn;
+    ctx.drawImage(ART.gpsCanvas, cell.x0, cell.y0, cell.w, cell.h, x, y, w, h);
+    var sx = x + ART.gpsScreen.x * w, sy = y + ART.gpsScreen.y * h;
+    var sw = ART.gpsScreen.w * w,     sh = ART.gpsScreen.h * h;
+  } else {
+    // placeholder unit: slab + bracket
+    ctx.fillStyle = '#22211f';
+    roundRect(ctx, x, y, w, h, h * 0.10); ctx.fill();
+    ctx.strokeStyle = '#4c4842'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#1a1918';
+    ctx.fillRect(x + w * 0.42, y + h, w * 0.16, h * 0.16);
+    sx = x + w * 0.06; sy = y + h * 0.08; sw = w * 0.88; sh = h * 0.80;
+  }
+
+  // --- the screen ----------------------------------------------------------
+  ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
+  ctx.fillStyle = '#101d16';
+  ctx.fillRect(sx, sy, sw, sh);
+
+  // fake top-down map: grid, route, chevron (you), checkered pin (destination)
+  ctx.strokeStyle = 'rgba(90,140,110,0.35)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const gy2 = sy + (sh / 4) * i;
+    ctx.beginPath(); ctx.moveTo(sx, gy2); ctx.lineTo(sx + sw, gy2); ctx.stroke();
+  }
+  for (let i = 1; i < 5; i++) {
+    const gx2 = sx + (sw / 5) * i;
+    ctx.beginPath(); ctx.moveTo(gx2, sy); ctx.lineTo(gx2, sy + sh); ctx.stroke();
+  }
+  // route: a straight line you are barely moving along
+  ctx.strokeStyle = '#7fd6a2'; ctx.lineWidth = Math.max(2, sh * 0.05);
+  ctx.beginPath();
+  ctx.moveTo(sx + sw * 0.18, sy + sh * 0.86);
+  ctx.lineTo(sx + sw * 0.82, sy + sh * 0.16);
+  ctx.stroke();
+  // chevron = you
+  ctx.save();
+  ctx.translate(sx + sw * 0.24, sy + sh * 0.79);
+  ctx.rotate(-0.72);
+  ctx.fillStyle = '#eef4ee';
+  ctx.beginPath();
+  ctx.moveTo(0, -sh * 0.07); ctx.lineTo(sh * 0.05, sh * 0.06);
+  ctx.lineTo(0, sh * 0.02);  ctx.lineTo(-sh * 0.05, sh * 0.06);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  // checkered destination pin
+  {
+    const px2 = sx + sw * 0.82, py2 = sy + sh * 0.16, s = Math.max(3, sh * 0.055);
+    for (let cy = 0; cy < 2; cy++) for (let cx = 0; cx < 2; cx++) {
+      ctx.fillStyle = (cx + cy) % 2 ? '#101010' : '#e8e8e2';
+      ctx.fillRect(px2 + cx * s, py2 - s * 2 + cy * s, s, s);
+    }
+    ctx.strokeStyle = '#c9c9c2'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px2, py2); ctx.lineTo(px2, py2 - s * 2); ctx.stroke();
+  }
+
+  // readouts: DEST + a huge, ever-growing ETA
+  const mono = 'ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#bfe8cd';
+  ctx.font = `600 ${Math.max(7, sh * 0.14)}px ${mono}`;
+  ctx.fillText(`DEST: ${gps.destMi.toFixed(1)} mi`, sx + sw * 0.05, sy + sh * 0.05);
+
+  if (gps.recalcFlash > 0 && Math.floor(gps.recalcFlash * 6) % 2 === 0) {
+    ctx.fillStyle = '#ffd27a';
+    ctx.font = `700 ${Math.max(7, sh * 0.15)}px ${mono}`;
+    ctx.fillText('RECALCULATING...', sx + sw * 0.05, sy + sh * 0.40);
+  } else {
+    const hrs = Math.floor(gps.etaMin / 60), mins = Math.round(gps.etaMin % 60);
+    const eta = hrs > 0 ? `${hrs}h ${String(mins).padStart(2, '0')}m` : `${mins} min`;
+    ctx.fillStyle = '#eef4ee';
+    ctx.font = `700 ${Math.max(10, sh * 0.26)}px ${mono}`;
+    ctx.fillText(`ETA ${eta}`, sx + sw * 0.05, sy + sh * 0.36);
+  }
+  ctx.restore();
+}
+
+function drawUnlockBanner(ctx) {
+  if (!unlocks.banner) return;
+  const t = unlocks.banner.t;
+  // slide in (0-0.4s), hold, slide out (last 0.6s)
+  const inK  = clamp(t / 0.4, 0, 1);
+  const outK = clamp((t - 4.0) / 0.6, 0, 1);
+  const k = Math.min(1 - Math.pow(1 - inK, 3), 1) * (1 - outK * outK);
+  const bh = clamp(ui.h * 0.085, 34, 64);
+  const y = -bh + k * (bh + ui.h * 0.03);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(12,14,12,0.92)';
+  const bw = Math.min(ui.w * 0.6, 520);
+  const x = (ui.w - bw) / 2;
+  roundRect(ctx, x, y, bw, bh, 6); ctx.fill();
+  ctx.strokeStyle = '#ffc14d'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#ffc14d';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = `700 ${bh * 0.34}px ui-monospace, Menlo, monospace`;
+  ctx.fillText(unlocks.banner.text, ui.w / 2, y + bh / 2);
+  ctx.restore();
+}
+
+// blinker indicator on the dash, left or right of the instrument cluster
+function drawBlinker(ctx) {
+  if (player.signalDir === 0) return;
+  const on = Math.floor(player.blinkT / (LANE.BLINK_PERIOD_S / 2)) % 2 === 0;
+  if (!on) return;
+  const R = ui.rect, T = COCKPIT.trip;
+  const size = clamp(R.h * 0.028, 8, 20);
+  const y = R.y + (T.y + 0.012) * R.h;
+  const x = R.x + (player.signalDir < 0 ? (T.x - 0.030) : (T.x + T.w + 0.030)) * R.w;
+  ctx.save();
+  ctx.fillStyle = '#63d97c';
+  ctx.shadowColor = 'rgba(99,217,124,0.9)'; ctx.shadowBlur = size * 0.8;
+  ctx.beginPath();
+  const d = player.signalDir;
+  ctx.moveTo(x + d * size, y + size * 0.55);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x, y + size * 1.1);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// First-person thumbs-up: rise / hold / present-away, from the bottom edge.
+function drawEmote(ctx) {
+  // the touch button (always available during play)
+  if (state === 'play' && ui.hit.emote) {
+    const r = ui.hit.emote;
+    const ready = stats.time >= emote.cooldownUntil;
+    ctx.save();
+    ctx.globalAlpha = ready ? 0.85 : 0.35;
+    ctx.fillStyle = 'rgba(30,32,30,0.75)';
+    roundRect(ctx, r.x, r.y, r.w, r.h, Math.min(r.w, r.h) * 0.2); ctx.fill();
+    ctx.strokeStyle = ready ? 'rgba(232,228,216,0.55)' : 'rgba(232,228,216,0.25)';
+    ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+    // simple stroked thumb glyph (no emoji)
+    ctx.save();
+    ctx.globalAlpha = ready ? 0.9 : 0.4;
+    ctx.strokeStyle = '#e8e4d8'; ctx.lineWidth = Math.max(2, r.h * 0.06);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2, s = Math.min(r.w, r.h) * 0.30;
+    ctx.beginPath();
+    ctx.moveTo(cx - s, cy + s * 0.2); ctx.lineTo(cx - s * 0.3, cy + s * 0.2);
+    ctx.lineTo(cx - s * 0.3, cy + s);
+    ctx.moveTo(cx - s * 0.3, cy + s * 0.2);
+    ctx.lineTo(cx + s * 0.1, cy - s * 0.7);
+    ctx.lineTo(cx + s * 0.5, cy - s * 0.5);
+    ctx.lineTo(cx + s * 0.2, cy + s * 0.2);
+    ctx.lineTo(cx + s * 0.8, cy + s * 0.2);
+    ctx.lineTo(cx + s * 0.8, cy + s);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (emote.t < 0) return;
+  const t = emote.t;
+  // phase -> vertical progress (0 = fully off-screen, 1 = presented)
+  let k, frame;
+  if (t < EMOTE.RISE_S)                       { k = t / EMOTE.RISE_S; frame = 0; }
+  else if (t < EMOTE.RISE_S + EMOTE.HOLD_S)   { k = 1; frame = 1; }
+  else { k = 1 - (t - EMOTE.RISE_S - EMOTE.HOLD_S) / EMOTE.AWAY_S; frame = 2; }
+  k = clamp(k, 0, 1);
+  const ease = 1 - Math.pow(1 - k, 2);
+
+  const hh = ui.h * 0.62;                       // hand height on screen
+  const y = ui.h - ease * hh;
+  const xC = ui.w * 0.60;                       // right of the wheel, driver's arm
+
+  ctx.save();
+  if (ART.handCanvas && ART.handCells && ART.handCells[frame] && ART.handCells[frame].glow) {
+    const b = ART.handCells[frame].glow;
+    const dw = hh * (b.w / b.h);
+    ctx.drawImage(ART.handCanvas, b.x0, b.y0, b.w, b.h, xC - dw / 2, y, dw, hh);
+  } else {
+    // placeholder drawn hand — the real 3-frame sprite drops into ASSETS.hand
+    const s = hh * 0.5;
+    ctx.translate(xC, y + hh * 0.55);
+    ctx.fillStyle = '#caa287';
+    roundRect(ctx, -s * 0.28, -s * 0.1, s * 0.56, s * 0.9, s * 0.1); ctx.fill();   // fist
+    roundRect(ctx, -s * 0.16, -s * 0.62, s * 0.24, s * 0.6, s * 0.12); ctx.fill(); // thumb
+    ctx.fillStyle = '#6a6f78';
+    roundRect(ctx, -s * 0.5, s * 0.55, s, s * 0.9, s * 0.1); ctx.fill();           // sleeve
+  }
+  ctx.restore();
+}
+
 function drawOverlay() {
   const ctx = ui.ctx;
   ctx.clearRect(0, 0, ui.w, ui.h);
@@ -2479,11 +2826,16 @@ function drawOverlay() {
 
   drawHUD(ctx);
   drawStereo(ctx);
+  drawGPS(ctx);
+  drawBlinker(ctx);
 
   const W = ui.hit.wheel;
   drawWheel(ctx, W.cx, W.cy, ui.wheelArtR || W.r, player.wheel);
   drawPedal(ctx, ui.hit.brake, 2, 'BRAKE', input.brake);
   drawPedal(ctx, ui.hit.gas,   0, 'GAS',   input.gas);
+
+  drawEmote(ctx);
+  drawUnlockBanner(ctx);
 
   if (debugOn) drawDebug(ctx);
 }
@@ -2515,6 +2867,7 @@ function bindInput() {
       case 'KeyD': case 'ArrowRight': input.right = true; e.preventDefault(); break;
       case 'KeyS': if (state === 'play') Audio.toggleStereo(); break;
       case 'KeyG': debugOn = !debugOn; break;
+      case 'KeyE': triggerEmote(); break;
     }
   });
   addEventListener('keyup', e => {
@@ -2531,12 +2884,15 @@ function bindInput() {
 
   cv.addEventListener('pointerdown', e => {
     if (state !== 'play') return;
-    cv.setPointerCapture(e.pointerId);
+    // Can throw for a pointer that is already gone (fast tap, or synthetic
+    // events); capture is a nicety, not a requirement.
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
     const x = localX(e), y = localY(e);
 
     if (pointInRect(x, y, ui.hit.gas))        { input.pointers.set(e.pointerId, 'gas');   input.gas = true; return; }
     if (pointInRect(x, y, ui.hit.brake))      { input.pointers.set(e.pointerId, 'brake'); input.brake = true; return; }
     if (pointInRect(x, y, ui.hit.stereo))     { input.pointers.set(e.pointerId, 'stereo'); Audio.toggleStereo(); return; }
+    if (ui.hit.emote && pointInRect(x, y, ui.hit.emote)) { input.pointers.set(e.pointerId, 'emote'); triggerEmote(); return; }
 
     const W = ui.hit.wheel;
     if (Math.hypot(x - W.cx, y - W.cy) <= W.r * 1.25) {
@@ -2627,6 +2983,9 @@ function startGame() {
   over.classList.remove('show');    // reset the fade for the next crash
   over.hidden = true;
   resetPlayer();
+  resetUnlocks();
+  emote.t = -1; emote.cooldownUntil = 0;
+  Audio.rateMult = 1;
   stats.time = 0; stats.startS = player.s; stats.bumps = 0; stats.honks = 0;
   stats.topSpeed = 0; stats.lastBump = -9; stats.lastScrape = -9; stats.impact = 0;
   shakeAmt = 0;
@@ -2672,6 +3031,131 @@ function gameOver(relSpeed, car) {
     void over.offsetWidth;          // force a reflow so the transition runs.
     over.classList.add('show');     // (rAF would be throttled in a hidden tab)
   }, AUDIO.GAMEOVER_FADE_START_S * 1000);
+}
+
+// =============================================================================
+//  JEFF PASS — distance unlocks + GPS
+// =============================================================================
+
+const unlocks = { fired: {}, banner: null };
+
+const gps = {
+  active: false, dropT: 0,
+  destMi: 0, etaMin: 0,
+  nextRecalc: 0, recalcFlash: 0,
+};
+
+function resetUnlocks() {
+  unlocks.fired = {};
+  unlocks.banner = null;
+  gps.active = false;
+  gps.dropT = 0;
+  gps.destMi = GPS.DEST_MI_START;
+  gps.etaMin = GPS.ETA_START_MIN;
+  gps.nextRecalc = 0;
+  gps.recalcFlash = 0;
+}
+
+function fireUnlock(u) {
+  unlocks.fired[u.id] = true;
+  unlocks.banner = { text: `UNLOCKED: ${u.label}`, t: 0 };
+  // TODO(audio): real unlock chime — reusing the short 'beep' horn voice,
+  // twice, as the placeholder tone.
+  Audio.honk({ kind: 'beep', dist: 30, pan: 0, bus: Audio.sfxBus });
+  setTimeout(() => Audio.honk({ kind: 'beep', dist: 20, pan: 0, bus: Audio.sfxBus }), 180);
+
+  if (u.id === 'gps') {
+    gps.active = true;
+    gps.dropT = 0;
+    gps.nextRecalc = stats.time + rand(GPS.RECALC_MIN_S, GPS.RECALC_MAX_S);
+  }
+}
+
+function updateUnlocks(dt) {
+  const feet = Math.max(0, (player.s - stats.startS) * FT);
+  for (const u of UNLOCKS) {
+    if (!unlocks.fired[u.id] && feet >= u.ft) fireUnlock(u);
+  }
+  if (unlocks.banner) {
+    unlocks.banner.t += dt;
+    if (unlocks.banner.t > 4.6) unlocks.banner = null;
+  }
+
+  if (gps.active) {
+    gps.dropT = Math.min(gps.dropT + dt, GPS.DROP_S);
+    // Distance ticks down insultingly slowly and never reaches zero.
+    gps.destMi = Math.max(GPS.DEST_MI_FLOOR,
+      GPS.DEST_MI_START - (feet / 5280) * GPS.DEST_PROGRESS_RATIO);
+    // The ETA ONLY EVER GOES UP.
+    if (gps.recalcFlash > 0) gps.recalcFlash -= dt;
+    if (stats.time >= gps.nextRecalc) {
+      gps.nextRecalc = stats.time + rand(GPS.RECALC_MIN_S, GPS.RECALC_MAX_S);
+      gps.etaMin += Math.round(rand(GPS.ETA_BUMP_MIN, GPS.ETA_BUMP_MAX));
+      gps.recalcFlash = GPS.RECALC_FLASH_S;
+      // TODO(audio): GPS "recalculating" chirp — reusing the 'beep' horn
+      // voice as the placeholder tone.
+      Audio.honk({ kind: 'beep', dist: 40, pan: 0.3, bus: Audio.sfxBus });
+    }
+  }
+}
+
+// =============================================================================
+//  JEFF PASS — thumbs-up emote
+// =============================================================================
+
+const emote = { t: -1, cooldownUntil: 0 };
+const EMOTE_TOTAL = () => EMOTE.RISE_S + EMOTE.HOLD_S + EMOTE.AWAY_S;
+
+function triggerEmote() {
+  if (state !== 'play' || paused) return;
+  if (stats.time < emote.cooldownUntil) return;
+  emote.t = 0;
+  emote.cooldownUntil = stats.time + EMOTE.COOLDOWN_S;
+
+  // ENRAGE nearby traffic: everyone within RAGE_RADIUS honks in an
+  // overlapping flurry, louder and denser than the ambient bed. Existing honk
+  // voices only — the boost rides the anger parameter.
+  const nearby = [];
+  for (const lane of lanes) {
+    const lx = laneX(lane.index);
+    for (const c of lane.cars) {
+      const d = Math.hypot(c.s - player.s, lx - player.x);
+      if (d < EMOTE.RAGE_RADIUS) nearby.push({ c, d, lx });
+    }
+  }
+  nearby.sort((a, b) => a.d - b.d);
+  nearby.forEach(({ c, d, lx }, i) => {
+    setTimeout(() => {
+      Audio.honk({
+        kind: i % 3 === 0 ? 'lean' : (i % 3 === 1 ? 'double' : 'mid'),
+        pan: clamp((lx - player.x) / (CFG.LANE_WIDTH * 1.6), -1, 1),
+        dist: Math.max(2, d * 0.5),          // denser + closer = louder
+        anger: 2 * (EMOTE.RAGE_VOLUME_BOOST - 0.5),   // = +50% peak volume
+        bus: Audio.sfxBus,
+      });
+      stats.honks++;
+    }, i * 140 + Math.random() * 120);
+  });
+
+  // The two nearest cars take it personally: 30% tighter following with
+  // harsher brake slams, for a while.
+  for (const { c } of nearby.slice(0, EMOTE.TAILGATE_COUNT)) {
+    c.tailgateUntil = stats.time + EMOTE.TAILGATE_S;
+    c.brakeMult = EMOTE.TAILGATE_BRAKE_MULT;
+    setTimeout(() => { c.brakeMult = 1; }, EMOTE.TAILGATE_S * 1000);
+  }
+
+  // Ambient honk frequency doubles for a while (same voices, just more often).
+  Audio.rateMult = EMOTE.AMBIENT_RATE_MULT;
+  clearTimeout(emote.rateTimer);
+  emote.rateTimer = setTimeout(() => { Audio.rateMult = 1; }, EMOTE.AMBIENT_RATE_S * 1000);
+}
+
+function updateEmote(dt) {
+  if (emote.t >= 0) {
+    emote.t += dt;
+    if (emote.t > EMOTE_TOTAL()) emote.t = -1;
+  }
 }
 
 // =============================================================================
@@ -2953,9 +3437,12 @@ function frame(now) {
   if (state === 'play' && !paused) {
     stats.time += dt;
     updatePlayer(dt);
+    updateBlinkerDenial();
     for (const lane of lanes) updateLane(lane, dt);
     checkCollisions();
     updateHonking(dt);
+    updateUnlocks(dt);
+    updateEmote(dt);
     Audio.setEngine(player.speed, player.gas);
     if (player.brake > 0.55 && player.speed > AUDIO.BRAKE_SQUEAK_MIN_MPH * MPH) Audio.squeak();
   }
@@ -2989,11 +3476,13 @@ async function boot() {
 
   // ---- load whatever art exists; placeholder the rest ---------------------
   const [rearImg, img34, semiImg, frontsImg, cockpitImg,
-         wheelImg, stereoImg, pedalsImg, roadImg, wallImg, signImg, titleImg] = await Promise.all([
+         wheelImg, stereoImg, pedalsImg, roadImg, wallImg, signImg, titleImg,
+         gpsImg, handImg] = await Promise.all([
     loadImage(ASSETS.carsRear), loadImage(ASSETS.cars34), loadImage(ASSETS.semiRear),
     loadImage(ASSETS.fronts),   loadImage(ASSETS.cockpit), loadImage(ASSETS.wheel),
     loadImage(ASSETS.stereo),   loadImage(ASSETS.pedals),  loadImage(ASSETS.road),
     loadImage(ASSETS.wall),     loadImage(ASSETS.sign),    loadImage(ASSETS.title),
+    loadImage(ASSETS.gps),      loadImage(ASSETS.hand),
   ]);
   ART.cockpit = cockpitImg;
   ART.wheel   = wheelImg;
@@ -3078,6 +3567,58 @@ async function boot() {
     if (ART.pedalCells.length < 4) console.warn('[assets] Pedals.png: expected 4 cells');
   }
 
+  // ---- GPS unit (JEFF PASS) ----------------------------------------------
+  // 2 cells: off / on. The ON cell's screen is flat magenta — a chroma key.
+  // We never draw the magenta: its measured rect is where the live map goes,
+  // painted opaquely over it.
+  if (gpsImg) {
+    ART.gpsCanvas = toCanvas(gpsImg);
+    const cells = segmentSheet(ART.gpsCanvas, 1, [2]);
+    if (cells.length >= 2) {
+      ART.gpsOn = cells[1].glow ? {
+        x0: cells[1].glow.x0, y0: cells[1].glow.y0,
+        w: cells[1].glow.w, h: cells[1].glow.h,
+      } : null;
+      if (ART.gpsOn) {
+        // find the magenta key inside the ON cell
+        const c = ART.gpsCanvas.getContext('2d', { willReadFrequently: true });
+        const d = c.getImageData(ART.gpsOn.x0, ART.gpsOn.y0, ART.gpsOn.w, ART.gpsOn.h).data;
+        let mx0 = 1e9, my0 = 1e9, mx1 = -1, my1 = -1;
+        for (let y = 0; y < ART.gpsOn.h; y++) {
+          for (let x = 0; x < ART.gpsOn.w; x++) {
+            const i = (y * ART.gpsOn.w + x) << 2;
+            if (d[i] > 180 && d[i + 2] > 180 && d[i + 1] < 130) {
+              if (x < mx0) mx0 = x; if (x > mx1) mx1 = x;
+              if (y < my0) my0 = y; if (y > my1) my1 = y;
+            }
+          }
+        }
+        if (mx1 > mx0) {
+          ART.gpsScreen = {
+            x: mx0 / ART.gpsOn.w, y: my0 / ART.gpsOn.h,
+            w: (mx1 - mx0 + 1) / ART.gpsOn.w, h: (my1 - my0 + 1) / ART.gpsOn.h,
+          };
+          console.info('[assets] GPS art active, screen key found');
+        } else {
+          console.warn('[assets] GPS.png: no magenta screen key found — using placeholder unit');
+          ART.gpsOn = null;
+        }
+      }
+    }
+  }
+
+  // ---- thumbs-up hand (JEFF PASS): 3 frames, rise / hold / present --------
+  if (handImg) {
+    ART.handCanvas = toCanvas(handImg);
+    ART.handCells = segmentSheet(ART.handCanvas, 1, [3]);
+    if (ART.handCells.length < 3) {
+      console.warn(`[assets] ThumbsUp.png: expected 3 frames, segmented ${ART.handCells.length} — using placeholder hand`);
+      ART.handCells = null;
+    } else {
+      console.info('[assets] thumbs-up art active (3 frames)');
+    }
+  }
+
   // ---- steering wheel pivot ----------------------------------------------
   if (wheelImg) {
     const wc = toCanvas(wheelImg);
@@ -3115,10 +3656,14 @@ async function boot() {
     stepSim(dt) {
       stats.time += dt;
       updatePlayer(dt);
+      updateBlinkerDenial();
       for (const lane of lanes) updateLane(lane, dt);
       checkCollisions();
       updateHonking(dt);
+      updateUnlocks(dt);
+      updateEmote(dt);
     },
+    gps, unlocks, emote, triggerEmote,
   };
 
   requestAnimationFrame(frame);
