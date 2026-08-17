@@ -960,6 +960,9 @@ let semiAtlas = null;
 
 function laneX(i) { return (i - (CFG.LANE_COUNT - 1) / 2) * CFG.LANE_WIDTH; }
 
+// unit quad for wall-scrape decals (scaled per streak)
+const UNIT_DECAL = new THREE.PlaneGeometry(1, 1);
+
 /**
  * Bottom-anchored plane for a variant, built once and cached on it.
  * The geometry is translated so the sprite's TYRE LINE sits at local y=0, so
@@ -1414,6 +1417,9 @@ function updatePlayer(dt) {
     player.lateral = 0;
     player.speed = Math.max(0, player.speed - LANE.SCRAPE_DRAG * dt);
     shake(LANE.SCRAPE_SHAKE);
+    // stamp/grow the streak on the barrier at the contact point
+    if (!scrapeDecals.current || scrapeDecals.current.side !== side) beginScrapeDecal(side);
+    updateScrapeDecal(dt);
     if (stats.time - stats.lastScrape > 0.45) {
       stats.lastScrape = stats.time;
       // TODO(audio): looping metal-on-concrete scrape — reusing the one-shot
@@ -1431,6 +1437,7 @@ function updatePlayer(dt) {
   } else {
     player.scrapeT = 0;
     player.scraping = false;
+    scrapeDecals.current = null;   // episode over; the mark stays on the wall
   }
 
   // --- lane commit: crossed the line by >40% of car width ------------------
@@ -2781,9 +2788,13 @@ function drawEmote(ctx) {
   if (emote.t < 0) return;
   const t = emote.t;
   // phase -> vertical progress (0 = fully off-screen, 1 = presented)
+  // cell 1 on the slide-up, cell 2 for the hold, cell 3 as a brief flourish
+  // while still fully presented, kept through the slide-away.
+  const FLOURISH = Math.min(0.35, EMOTE.HOLD_S * 0.3);
   let k, frame;
-  if (t < EMOTE.RISE_S)                       { k = t / EMOTE.RISE_S; frame = 0; }
-  else if (t < EMOTE.RISE_S + EMOTE.HOLD_S)   { k = 1; frame = 1; }
+  if (t < EMOTE.RISE_S)                                  { k = t / EMOTE.RISE_S; frame = 0; }
+  else if (t < EMOTE.RISE_S + EMOTE.HOLD_S - FLOURISH)   { k = 1; frame = 1; }
+  else if (t < EMOTE.RISE_S + EMOTE.HOLD_S)              { k = 1; frame = 2; }
   else { k = 1 - (t - EMOTE.RISE_S - EMOTE.HOLD_S) / EMOTE.AWAY_S; frame = 2; }
   k = clamp(k, 0, 1);
   const ease = 1 - Math.pow(1 - k, 2);
@@ -2794,9 +2805,19 @@ function drawEmote(ctx) {
 
   ctx.save();
   if (ART.handCanvas && ART.handCells && ART.handCells[frame] && ART.handCells[frame].glow) {
+    // The three frames have very different crop heights (the fist-only rise
+    // frame is ~60% the height of the hold frame) but share a common bottom
+    // edge in the sheet. One shared scale, anchored at the sprite bottom —
+    // scaling each frame to the same screen height would make the arm jump
+    // size between frames.
+    if (!ART.handScaleH) {
+      ART.handScaleH = Math.max(...ART.handCells.map(c => c.glow ? c.glow.h : 1));
+    }
     const b = ART.handCells[frame].glow;
-    const dw = hh * (b.w / b.h);
-    ctx.drawImage(ART.handCanvas, b.x0, b.y0, b.w, b.h, xC - dw / 2, y, dw, hh);
+    const scale = hh / ART.handScaleH;
+    const dw = b.w * scale, dh = b.h * scale;
+    const bottom = ui.h + (1 - ease) * hh;   // rises from fully off-screen
+    ctx.drawImage(ART.handCanvas, b.x0, b.y0, b.w, b.h, xC - dw / 2, bottom - dh, dw, dh);
   } else {
     // placeholder drawn hand — the real 3-frame sprite drops into ASSETS.hand
     const s = hh * 0.5;
@@ -2984,6 +3005,7 @@ function startGame() {
   over.hidden = true;
   resetPlayer();
   resetUnlocks();
+  fadeOutScrapeDecals();          // last run's wall damage fades away
   emote.t = -1; emote.cooldownUntil = 0;
   Audio.rateMult = 1;
   stats.time = 0; stats.startS = player.s; stats.bumps = 0; stats.honks = 0;
@@ -3031,6 +3053,87 @@ function gameOver(relSpeed, car) {
     void over.offsetWidth;          // force a reflow so the transition runs.
     over.classList.add('show');     // (rAF would be throttled in a hidden tab)
   }, AUDIO.GAMEOVER_FADE_START_S * 1000);
+}
+
+// =============================================================================
+//  JEFF PASS — wall-scrape decals
+//  StreakCrash.png stamped along the barrier at the contact point. The streak
+//  spans from where the scrape began to the car's current position, so it
+//  grows with duration; episodes persist for the run and fade out on restart.
+// =============================================================================
+
+const scrapeDecals = { list: [], dying: [], current: null };
+
+function streakTexture() {
+  if (ART.streakTex) return ART.streakTex;
+  if (!ART.streakCanvas) return null;
+  const b = ART.streakBox;
+  const c = makeCanvas(b.w, b.h);
+  c.getContext('2d').drawImage(ART.streakCanvas, b.x0, b.y0, b.w, b.h, 0, 0, b.w, b.h);
+  ART.streakTex = textureFrom(c);
+  return ART.streakTex;
+}
+
+function beginScrapeDecal(side) {
+  const tex = streakTexture();
+  const mat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    // slightly darker on the LEFT guardrail so paint-transfer reads on metal
+    color: side < 0 ? LANE.DECAL_TINT_LEFT : 0xffffff,
+  });
+  if (tex) mat.map = tex;
+  else     mat.color.setHex(side < 0 ? 0x565a5e : 0x8f8a80);   // fallback: bare smear
+
+  const mesh = new THREE.Mesh(UNIT_DECAL, mat);
+  mesh.rotation.y = Math.PI / 2;
+  // stamped on the VISUAL barrier face, nudged off it to avoid z-fighting
+  mesh.position.x = side > 0 ? WORLD.WALL_X - 0.05 : WORLD.RAIL_X + 0.05;
+  mesh.position.y = LANE.DECAL_Y_M;
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+
+  const d = { mesh, side, s0: player.s, s1: player.s, mat };
+  scrapeDecals.current = d;
+  scrapeDecals.list.push(d);
+  while (scrapeDecals.list.length > LANE.DECAL_MAX) {
+    const old = scrapeDecals.list.shift();
+    scene.remove(old.mesh); old.mat.dispose();
+  }
+}
+
+function updateScrapeDecal(dt) {
+  const d = scrapeDecals.current;
+  if (!d) return;
+  d.s1 = player.s;
+  // grinding in place still chews the barrier a little
+  d.s0 -= LANE.DECAL_GROW_S * dt * 0.5;
+}
+
+function layoutScrapeDecals(camS) {
+  for (const d of scrapeDecals.list) {
+    const len = Math.max(Math.abs(d.s1 - d.s0), LANE.DECAL_MIN_LEN);
+    d.mesh.scale.set(len, LANE.DECAL_HEIGHT_M, 1);
+    d.mesh.position.z = camS - (d.s0 + d.s1) / 2;
+  }
+  // the previous run's marks fade out; this run's marks are untouched
+  for (let i = scrapeDecals.dying.length - 1; i >= 0; i--) {
+    const d = scrapeDecals.dying[i];
+    d.mesh.position.z = camS - (d.s0 + d.s1) / 2;
+    d.mat.opacity -= 0.04;
+    if (d.mat.opacity <= 0) {
+      scene.remove(d.mesh); d.mat.dispose();
+      scrapeDecals.dying.splice(i, 1);
+    }
+  }
+}
+
+function fadeOutScrapeDecals() {
+  scrapeDecals.current = null;
+  scrapeDecals.dying.push(...scrapeDecals.list);
+  scrapeDecals.list.length = 0;
 }
 
 // =============================================================================
@@ -3392,6 +3495,8 @@ function updateScenery() {
   // sign gantry: forever one mile away
   if (player.s > world.gantryS - 25) world.gantryS += WORLD.SIGN_RECYCLE_M;
   world.gantry.position.z = camS - world.gantryS;
+
+  layoutScrapeDecals(camS);
 }
 
 function updateCamera(dt) {
@@ -3477,12 +3582,12 @@ async function boot() {
   // ---- load whatever art exists; placeholder the rest ---------------------
   const [rearImg, img34, semiImg, frontsImg, cockpitImg,
          wheelImg, stereoImg, pedalsImg, roadImg, wallImg, signImg, titleImg,
-         gpsImg, handImg] = await Promise.all([
+         gpsImg, handImg, streakImg] = await Promise.all([
     loadImage(ASSETS.carsRear), loadImage(ASSETS.cars34), loadImage(ASSETS.semiRear),
     loadImage(ASSETS.fronts),   loadImage(ASSETS.cockpit), loadImage(ASSETS.wheel),
     loadImage(ASSETS.stereo),   loadImage(ASSETS.pedals),  loadImage(ASSETS.road),
     loadImage(ASSETS.wall),     loadImage(ASSETS.sign),    loadImage(ASSETS.title),
-    loadImage(ASSETS.gps),      loadImage(ASSETS.hand),
+    loadImage(ASSETS.gps),      loadImage(ASSETS.hand),    loadImage(ASSETS.streak),
   ]);
   ART.cockpit = cockpitImg;
   ART.wheel   = wheelImg;
@@ -3616,6 +3721,21 @@ async function boot() {
       ART.handCells = null;
     } else {
       console.info('[assets] thumbs-up art active (3 frames)');
+    }
+  }
+
+  // ---- wall-scrape decal (JEFF PASS): single wide streak ------------------
+  if (streakImg) {
+    ART.streakCanvas = toCanvas(streakImg);
+    const c = ART.streakCanvas.getContext('2d', { willReadFrequently: true });
+    const d = c.getImageData(0, 0, ART.streakCanvas.width, ART.streakCanvas.height).data;
+    ART.streakBox = alphaBBox(d, ART.streakCanvas.width,
+                              0, 0, ART.streakCanvas.width, ART.streakCanvas.height, 16);
+    if (ART.streakBox) {
+      console.info(`[assets] scrape decal active (${ART.streakBox.w}x${ART.streakBox.h} content)`);
+    } else {
+      console.warn('[assets] StreakCrash.png: no visible content — bare smear fallback');
+      ART.streakCanvas = null;
     }
   }
 

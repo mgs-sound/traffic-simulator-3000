@@ -154,6 +154,7 @@ export const ASSETS = {
   title:    'assets/Title.png',            // start-screen logo
   gps:      'assets/GPS.png',              // 2 cells: off / on-with-magenta-key screen
   hand:     'assets/ThumbsUp.png',         // 3 frames: rise / hold / present
+  streak:   'assets/StreakCrash.png',      // wall-scrape decal, single wide streak
   music:    'assets/buttrock.mp3',         // the cassette that is stuck in there
 };
 
@@ -411,6 +412,14 @@ export const LANE = {
   SCRAPE_MAX_S:   3.0,       // continuous scraping longer than this = game over
   SCRAPE_DRAG:    2.2,       // m/s² speed scrub while scraping
   SCRAPE_SHAKE:   0.35,      // continuous screen rumble amplitude
+
+  // --- scrape decal (StreakCrash.png stamped along the barrier) ---
+  DECAL_HEIGHT_M: 0.62,      // world height of the streak band
+  DECAL_Y_M:      0.72,      // centre height on the barrier (door-panel line)
+  DECAL_MIN_LEN:  1.2,       // m — a touch always leaves at least this much
+  DECAL_GROW_S:   0.5,       // m of extra streak per second while pinned still
+  DECAL_TINT_LEFT: 0x8f8f8f, // darker on the guardrail so it reads on metal
+  DECAL_MAX: 6,              // keep this many episodes before recycling
 };
 
 // =============================================================================
