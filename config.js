@@ -442,7 +442,7 @@ export const GPS = {
   // Position, fractions of the cockpit art: sitting on the LOW part of the
   // dashboard shelf, right of the instrument cluster — mount planted on the
   // dash surface, screen just breaking the windshield line.
-  rect: { x: 0.545, y: 0.439, w: 0.135, h: 0.155 },   // (0.450 - ~10px of art height)
+  rect: { x: 0.545, y: 0.434, w: 0.135, h: 0.155 },   // (0.439 - ~5px of art height)
   DROP_S: 0.55,              // drop-in animation duration at unlock
 
   DEST_MI_START: 14.2,
