@@ -1056,9 +1056,12 @@ function buildTraffic() {
   for (let i = 0; i < CFG.LANE_COUNT; i++) {
     const lane = lanes[i];
     // ahead — adjacent lanes start beyond the dead zone so nothing spawns
-    // alongside the driver as a giant billboard
+    // alongside the driver as a giant billboard. The player's own lane gets a
+    // real cushion so the first seconds of gas aren't an instant rear-ending.
     const isAdjacent = (i !== 1);
-    let s = player.s + (isAdjacent ? CFG.ADJACENT_DEAD_ZONE + CFG.ADJACENT_FADE_ZONE + 2 : 5);
+    let s = player.s + (isAdjacent
+      ? CFG.ADJACENT_DEAD_ZONE + CFG.ADJACENT_FADE_ZONE + 2
+      : CFG.START_CUSHION);
     for (let k = 0; k < CFG.CAR_COUNT_AHEAD; k++) {
       const semiHere = (i === SEMI.lane && k === SEMI.slot);
       const c = spawnCar(i, s + (semiHere ? SEMI.length / 2 : 0), semiHere);

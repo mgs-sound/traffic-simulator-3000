@@ -77,6 +77,9 @@ export const CFG = {
   RECYCLE_AHEAD:  420,  // m ahead before a car is recycled backward
   RESPAWN_MIN:     80,  // recycled cars always reappear far away, never near
   RESPAWN_MAX:    120,  //   the camera where they would pop in huge
+  START_CUSHION:   13,  // m of clear air to the first car at ignition. The
+                        // spawn rewrite left only ~2.9 m, which made the first
+                        // gas press lethal ~3 s into the run.
 
   // Adjacent-lane cars this close (or closer) to the camera are faded out and
   // hidden. A camera-facing billboard alongside the driver is metres wide and
